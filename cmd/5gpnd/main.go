@@ -613,8 +613,9 @@ func cmdProfile(args []string) error {
 	if err := os.WriteFile(out, b, 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("已生成 %s\n  relay = https://%s:%d/\n  直连域名 = %d 条\n",
-		out, cfg.Relay.Host, portOf(cfg.Relay.Listen), len(cfg.ExcludedDomains))
+	fmt.Printf("已生成 %s\n  relay = https://%s:%d/\n  手机本地直连域名 = %d 条\n",
+		out, cfg.Relay.Host, portOf(cfg.Relay.Listen),
+		len(profile.EffectiveExcludedDomains(cfg.ExcludedDomains)))
 	return nil
 }
 

@@ -845,7 +845,7 @@ func (b *Bot) showClient(ctx context.Context, v view) {
 	sb.WriteString("📱 <b>客户端接入</b>\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	sb.WriteString("🍎 <b>iPhone / iPad</b>　<i>iOS 17 及以上</i>\n")
-	sb.WriteString("<blockquote>获取描述文件后点开即可安装，无需任何应用。</blockquote>\n")
+	sb.WriteString("<blockquote>描述文件内置国内手机直连名单：抖音等常用国内 App 不进入境外 Relay；国外流量再由网关分流。</blockquote>\n")
 	sb.WriteString("🤖 <b>Android</b>\n")
 	sb.WriteString("<blockquote>在系统「私人 DNS」中填一个域名即可，同样无需安装应用。</blockquote>")
 
@@ -1033,10 +1033,10 @@ func (b *Bot) sendProfile(ctx context.Context, v view) {
 	}
 
 	caption := "<b>iOS 描述文件</b>\n\n" +
-		"1. 点击上方文件并选择下载\n" +
-		"2. 打开 设置 → 通用 → VPN 与设备管理\n" +
-		"3. 安装「5gpn-NEXT」描述文件\n\n" +
-		"<i>安装前请先删除同名的旧描述文件。</i>"
+		"1. 先删除同名的旧描述文件\n" +
+		"2. 点击上方文件并选择下载\n" +
+		"3. 打开 设置 → 通用 → VPN 与设备管理并安装\n\n" +
+		"<i>新版内置国内手机直连名单；Token 与网关身份保持不变。</i>"
 
 	if err := b.sendDocument(ctx, v.chatID, "5gpn-next.mobileconfig", data, caption); err != nil {
 		b.render(ctx, v, errBox("发送失败", err), backTo("client"))

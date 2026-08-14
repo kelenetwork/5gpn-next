@@ -32,8 +32,8 @@ type Options struct {
 	TokenHeader string
 	Token       string
 
-	// ExcludedDomains 为手机侧直连名单（第一层分流）。
-	// 留空则全部流量进 Relay，由网关侧规则库判定。
+	// ExcludedDomains 为用户追加的手机侧直连名单（第一层分流）。
+	// 生产配置会自动合并 BuiltinExcludedDomains，避免国内流量先绕境外网关。
 	ExcludedDomains []string
 
 	// MatchDomains 非空时改为白名单模式（仅测试用）。
@@ -113,9 +113,11 @@ func (o Options) Build() ([]byte, error) {
 
 	if len(o.MatchDomains) > 0 {
 		relay.set("MatchDomains", strArray(o.MatchDomains))
-	}
-	if len(o.ExcludedDomains) > 0 {
-		relay.set("ExcludedDomains", strArray(dedupeSorted(o.ExcludedDomains)))
+	} else {
+		// iOS 的 Relay 一旦接管连接，服务端 DIRECT 也只是从境外网关本机
+		// 直出，无法再回到手机本地网络。国内常用域名必须在客户端侧排除，
+		// 才是真正“不绕 KFC/不受国外出口影响”。
+		relay.set("ExcludedDomains", strArray(EffectiveExcludedDomains(o.ExcludedDomains)))
 	}
 
 	root := dict{}
@@ -136,6 +138,41 @@ func (o Options) Build() ([]byte, error) {
 	root.render(&buf, 0)
 	buf.WriteString("</plist>\n")
 	return buf.Bytes(), nil
+}
+
+// BuiltinExcludedDomains 返回 iOS 手机侧直连的内置域名后缀。
+//
+// 不能把完整 11 万条 direct-list 塞进 mobileconfig：体积、安装耗时和
+// iOS 每次匹配成本都不可控。这里覆盖全部 .cn 与国内头部 App 的核心
+// 域名；遗漏项仍由服务端 cn-domain/GEOIP 走 KFC DIRECT，用户也可通过
+// config.excluded_domains 追加后缀。
+func BuiltinExcludedDomains() []string {
+	return []string{
+		"10010.com", "10086.cn", "12306.cn", "126.net", "163.com", "1688.com", "189.cn",
+		"360buyimg.com", "alibaba.com", "alicdn.com", "alipay.com", "alipayobjects.com",
+		"aliyun.com", "aliyuncs.com", "amemv.com", "baidu.com", "baidupcs.com", "bcebos.com",
+		"bdimg.com", "bdstatic.com", "biliapi.net", "bilibili.com", "byteacctimg.com",
+		"bytecdn.cn", "bytegoofy.com", "byteicdn.com", "bytedance.com", "bytednsdoc.com",
+		"byteimg.com", "chinamobile.com", "chinatelecom.com.cn", "chinaunicom.cn", "cn",
+		"cmpassport.com", "cnki.net", "ctrip.com", "dbankcdn.com", "dianping.com", "douyin.com",
+		"douyincdn.com", "douyinpic.com", "douyinstatic.com", "douyinvod.com", "ecombdapi.com",
+		"edu.cn", "feishu.cn", "gov.cn", "gtimg.cn", "hdslb.com", "heytapimage.com",
+		"heytapmobi.com", "hicloud.com", "hitv.com", "huawei.com", "iesdouyin.com", "iqiyi.com",
+		"iqiyipic.com", "ixigua.com", "jd.com", "jdcloud.com", "kuaishou.com", "kwimgs.com",
+		"meituan.com", "meituan.net", "mgtv.com", "mi.com", "miui.com", "mmstat.com",
+		"myqcloud.com", "netease.com", "ntes.net", "oppo.com", "org.cn", "pddpic.com",
+		"pinduoduo.com", "pstatp.com", "qiyi.com", "qlogo.cn", "qpic.cn", "qq.com",
+		"sina.com.cn", "sinaimg.cn", "snssdk.com", "taobao.com", "taobaocdn.com", "tenpay.com",
+		"tmall.com", "toutiao.com", "tripcdn.cn", "unicom.com.cn", "vivo.com.cn", "vmall.com",
+		"volccdn.com", "volcengine.com", "volces.com", "volcvideo.com", "wechat.com", "weibo.com",
+		"weibocdn.com", "weixin.qq.com", "wo.cn", "xiaomi.com", "xiaomicdn.com", "yangkeduo.com",
+		"ykimg.com", "youku.com", "yximgs.com", "zhihu.com", "zhimg.com", "zijieapi.com",
+	}
+}
+
+// EffectiveExcludedDomains 合并内置与用户追加的手机侧直连域名。
+func EffectiveExcludedDomains(custom []string) []string {
+	return dedupeSorted(append(BuiltinExcludedDomains(), custom...))
 }
 
 // ---------- 极简 plist 渲染（避免引入依赖） ----------
