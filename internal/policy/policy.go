@@ -82,6 +82,9 @@ type Engine struct {
 	// Engine 在热重载时整体替换，缓存自然随规则生命周期清空。
 	resolveMu    sync.RWMutex
 	resolveCache map[string]resolveEntry
+	// resolveSlots 限制并发 DNS：Speedtest 会瞬间枚举数千个全球节点，
+	// 无上限解析会堆积 goroutine 并把 256MB cgroup 顶穿。
+	resolveSlots chan struct{}
 }
 
 type resolveEntry struct {
@@ -96,6 +99,7 @@ func New() *Engine {
 		domainSets:   make(map[string]*ruleset.DomainSet),
 		cidrSets:     make(map[string]*ruleset.CIDRSet),
 		resolveCache: make(map[string]resolveEntry),
+		resolveSlots: make(chan struct{}, 32),
 	}
 }
 
@@ -292,20 +296,44 @@ func (e *Engine) resolve(ctx context.Context, host string) []netip.Addr {
 		return append([]netip.Addr(nil), cached.addrs...)
 	}
 
-	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// 高峰时直接退回域名规则/FINAL，不排队拖慢整条连接。
+	select {
+	case e.resolveSlots <- struct{}{}:
+		defer func() { <-e.resolveSlots }()
+	default:
+		return nil
+	}
+
+	// GEOIP 是兜底而不是连接前置硬依赖；350ms 内解析不到就放行
+	// 后续规则，避免个别坏 DNS 把首包拖满旧版的 2 秒。
+	rctx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupNetIP(rctx, "ip", host)
-	if err != nil {
-		return nil
-	}
 	addrs = normalizeAddrs(addrs)
-	if len(addrs) == 0 {
-		return nil
+	ttl := 5 * time.Minute
+	if err != nil || len(addrs) == 0 {
+		addrs = nil
+		ttl = 30 * time.Second // 负缓存，抑制同一坏域名反复解析
 	}
+
 	e.resolveMu.Lock()
+	// 有界缓存：先删过期项，仍过大时任意淘汰到 3072 条。
+	if len(e.resolveCache) >= 4096 {
+		for key, item := range e.resolveCache {
+			if now.After(item.expire) {
+				delete(e.resolveCache, key)
+			}
+		}
+		for key := range e.resolveCache {
+			if len(e.resolveCache) < 3072 {
+				break
+			}
+			delete(e.resolveCache, key)
+		}
+	}
 	e.resolveCache[host] = resolveEntry{
 		addrs:  append([]netip.Addr(nil), addrs...),
-		expire: now.Add(5 * time.Minute),
+		expire: now.Add(ttl),
 	}
 	e.resolveMu.Unlock()
 	return addrs

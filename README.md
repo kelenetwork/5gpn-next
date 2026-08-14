@@ -110,6 +110,8 @@ curl -fsSL https://raw.githubusercontent.com/kelenetwork/5gpn-next/main/uninstal
 
 也可以直接在 Telegram Bot 里点「客户端接入」获取文件。
 
+> ⚠️ Apple Managed Network Relay 是系统级网络配置，会同时作用于蜂窝和 Wi-Fi；它不是传统 VPN，但不能按网络接口设置“仅蜂窝启用”。iOS 26+ 可在系统设置中手动关闭 Relay，旧版系统只能停用/移除描述文件。
+>
 > iOS 的手机侧直连名单写在描述文件中，不会随服务器二进制自动改写。升级日志若注明直连名单更新，请在 Bot 中重新获取，并先删除同名旧描述文件后安装；Relay Token、下载路径和稳定 UUID 均沿用，不会改变网关身份。
 
 </td>

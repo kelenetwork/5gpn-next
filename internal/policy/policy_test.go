@@ -1,7 +1,10 @@
 package policy
 
 import (
+	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kelenetwork/5gpn-next/internal/ruleset"
 )
@@ -145,5 +148,34 @@ func TestParseTargetWithoutPort(t *testing.T) {
 	}
 	if tg.Port != 443 {
 		t.Errorf("应回退到 443，实际 %d", tg.Port)
+	}
+}
+
+func TestResolveSaturationFallsBackImmediately(t *testing.T) {
+	e := New()
+	for i := 0; i < cap(e.resolveSlots); i++ {
+		e.resolveSlots <- struct{}{}
+	}
+	start := time.Now()
+	if got := e.resolve(context.Background(), "would-block.invalid"); got != nil {
+		t.Fatalf("saturated resolver should return nil, got %v", got)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("saturated resolver blocked for %s", elapsed)
+	}
+}
+
+func TestResolveCacheIsBounded(t *testing.T) {
+	e := New()
+	past := time.Now().Add(-time.Minute)
+	for i := 0; i < 4096; i++ {
+		e.resolveCache[fmt.Sprintf("expired-%d.example", i)] = resolveEntry{expire: past}
+	}
+	got := e.resolve(context.Background(), "localhost")
+	if len(got) == 0 {
+		t.Fatal("localhost should resolve")
+	}
+	if n := len(e.resolveCache); n >= 4096 {
+		t.Fatalf("resolver cache was not pruned: %d", n)
 	}
 }

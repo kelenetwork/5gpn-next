@@ -32,6 +32,7 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/trace"
 	"github.com/kelenetwork/5gpn-next/internal/update"
 	"github.com/kelenetwork/5gpn-next/internal/web"
+	"golang.org/x/net/http2"
 )
 
 var version = "dev"
@@ -541,14 +542,26 @@ func cmdRun(args []string) error {
 	}
 
 	hs := &http.Server{
-		Addr:    a.cfg.Relay.Listen,
-		Handler: root,
+		Addr:              a.cfg.Relay.Listen,
+		Handler:           root,
+		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 			NextProtos:   []string{"h2", "http/1.1"},
 		},
-		IdleTimeout: 10 * time.Minute,
+		IdleTimeout: 5 * time.Minute,
+	}
+	// Apple Relay 通过长连接承载大量 CONNECT stream。x/net/http2 默认
+	// 每个 stream 给 1MiB 接收窗口，Speedtest 瞬间枚举数千节点时会迅速
+	// 撑爆 256MiB cgroup。限制并发并把每流窗口收紧到 64KiB。
+	if err := http2.ConfigureServer(hs, &http2.Server{
+		MaxConcurrentStreams:         128,
+		MaxUploadBufferPerConnection: 1 << 20,
+		MaxUploadBufferPerStream:     64 << 10,
+		IdleTimeout:                  5 * time.Minute,
+	}); err != nil {
+		return fmt.Errorf("配置 HTTP/2 Relay 失败: %w", err)
 	}
 
 	go func() {

@@ -60,7 +60,7 @@ func Default(host string, port int) Options {
 		TokenHeader:       "X-5gpn-Token",
 		Organization:      "5gpn-NEXT",
 		DisplayName:       "5gpn-NEXT",
-		Description:       "5gpn-NEXT 网络中继配置。可在「设置 → 通用 → VPN 与设备管理」中随时关闭或删除。",
+		Description:       "5gpn-NEXT 系统级网络中继，同时作用于蜂窝与 Wi-Fi。可在「设置 → 通用 → VPN 与设备管理」中关闭或删除。",
 		ProfileIdentifier: "de.ke1e.5gpn.next",
 		RelayIdentifier:   "de.ke1e.5gpn.next.relay",
 	}
