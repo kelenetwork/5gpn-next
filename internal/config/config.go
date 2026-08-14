@@ -5,11 +5,15 @@
 package config
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 )
 
 // Config 是完整配置。
@@ -223,16 +227,44 @@ func Load(path string) (*Config, error) {
 }
 
 // Save 原子写入配置。
+//
+// 服务沙箱（ProtectSystem=full）内 /etc 只读，直接写会 EROFS；
+// 此时降级为 systemd-run 请求 PID 1 在沙箱外完成同样的原子写。
 func (c *Config) Save(path string) error {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
+	return WriteFileSandboxSafe(path, append(b, '\n'), 0o600)
+}
+
+// WriteFileSandboxSafe 原子写文件；沙箱内目标路径只读时，
+// 经 systemd-run 由 PID 1 在沙箱外代写（与自升级同一通道）。
+// 内容以 base64 传递，避免任何引号/转义问题。
+func WriteFileSandboxSafe(path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		return err
+	if err := os.WriteFile(tmp, data, mode); err == nil {
+		if rerr := os.Rename(tmp, path); rerr == nil {
+			return nil
+		}
+		_ = os.Remove(tmp)
 	}
-	return os.Rename(tmp, path)
+
+	b64 := base64.StdEncoding.EncodeToString(data)
+	script := fmt.Sprintf(
+		"echo %s | base64 -d > %q && chmod %o %q && mv -f %q %q",
+		b64, tmp, mode, tmp, tmp, path)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemd-run",
+		"--quiet", "--wait", "--collect",
+		"--property=Type=oneshot",
+		"/bin/sh", "-c", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("写入 %s 失败（沙箱外代写也失败）: %v: %s",
+			path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // Validate 做基本校验。
