@@ -155,9 +155,15 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	// 判断该域名走直连还是代理
+	// 先向国内 DNS 上游解析真实 A 记录，再把目标 IP 交给 GEOIP。
+	// 这样不在 cn-domain 列表里的国内域名也能返回真实 IP，让 Android
+	// 手机本地直连；自定义域名规则仍按原顺序优先于内置 GEOIP。
 	tgt, _ := policy.ParseTarget(net.JoinHostPort(qname, "443"))
+	resolved, resolveErr := s.lookup(req, qname)
 	dec := s.Policy().Match(tgt)
+	if resolved != nil {
+		dec = s.Policy().MatchResolved(tgt, answerAddrs(resolved))
+	}
 
 	if dec.Action == policy.ActionBlock {
 		m := new(dns.Msg)
@@ -168,7 +174,11 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	if dec.Action == policy.ActionDirect {
-		s.forwardAndWrite(w, req, false, qname)
+		if resolveErr != nil || resolved == nil {
+			dns.HandleFailed(w, req)
+		} else {
+			_ = w.WriteMsg(resolved)
+		}
 		s.report(qname, "direct")
 		return
 	}
@@ -210,23 +220,31 @@ func (s *Server) isClient(addr net.Addr) bool {
 }
 
 func (s *Server) forwardAndWrite(w dns.ResponseWriter, req *dns.Msg, _ bool, qname string) {
+	resp, err := s.lookup(req, qname)
+	if err != nil || resp == nil {
+		dns.HandleFailed(w, req)
+		return
+	}
+	_ = w.WriteMsg(resp)
+}
+
+// lookup 使用本地 TTL 缓存查询上游，并把响应 ID 调整为当前请求。
+func (s *Server) lookup(req *dns.Msg, qname string) (*dns.Msg, error) {
 	key := fmt.Sprintf("%s|%d", qname, req.Question[0].Qtype)
 
 	s.cacheMu.RLock()
 	if e, ok := s.cache[key]; ok && time.Now().Before(e.expire) {
 		m := e.msg.Copy()
-		m.SetReply(req)
-		m.Answer = e.msg.Answer
 		s.cacheMu.RUnlock()
-		_ = w.WriteMsg(m)
-		return
+		m.Id = req.Id
+		m.Question = append([]dns.Question(nil), req.Question...)
+		return m, nil
 	}
 	s.cacheMu.RUnlock()
 
 	resp, err := s.query(req)
 	if err != nil || resp == nil {
-		dns.HandleFailed(w, req)
-		return
+		return nil, err
 	}
 
 	ttl := 60
@@ -238,8 +256,21 @@ func (s *Server) forwardAndWrite(w dns.ResponseWriter, req *dns.Msg, _ bool, qna
 	s.cacheMu.Lock()
 	s.cache[key] = cacheEntry{msg: resp.Copy(), expire: time.Now().Add(time.Duration(ttl) * time.Second)}
 	s.cacheMu.Unlock()
+	return resp, nil
+}
 
-	_ = w.WriteMsg(resp)
+func answerAddrs(resp *dns.Msg) []netip.Addr {
+	var out []netip.Addr
+	for _, rr := range resp.Answer {
+		a, ok := rr.(*dns.A)
+		if !ok {
+			continue
+		}
+		if ip, ok := netip.AddrFromSlice(a.A); ok {
+			out = append(out, ip.Unmap())
+		}
+	}
+	return out
 }
 
 // query 依次尝试上游，返回首个成功结果。

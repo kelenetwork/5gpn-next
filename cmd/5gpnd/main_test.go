@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/kelenetwork/5gpn-next/internal/config"
@@ -61,6 +62,43 @@ func TestForeignEgressDoesNotOverrideRulesOrDomestic(t *testing.T) {
 			if d.Action != tc.action || d.Egress != tc.egress {
 				t.Fatalf("%s => action=%s egress=%q rule=%s; want %s %q",
 					tc.target, d.Action, d.Egress, d.Rule, tc.action, tc.egress)
+			}
+		})
+	}
+}
+
+func TestResolvedGeoIPKeepsCustomRulesFirst(t *testing.T) {
+	cfg := config.Default()
+	cfg.Rules = []string{
+		"DOMAIN-SUFFIX,override.example,proxy:special",
+	}
+	cfg.Final = "proxy:hinet"
+
+	e := readyEngine()
+	if err := applyRules(cfg, e); err != nil {
+		t.Fatal(err)
+	}
+	cn := []netip.Addr{netip.MustParseAddr("39.156.66.10")}
+	foreign := []netip.Addr{netip.MustParseAddr("142.250.72.36")}
+
+	cases := []struct {
+		name   string
+		host   string
+		addrs  []netip.Addr
+		action policy.Action
+		egress string
+		rule   string
+	}{
+		{"未收录国内域名由 GEOIP 兜底", "unknown.example:443", cn, policy.ActionDirect, "", "GEOIP,cn"},
+		{"自定义规则覆盖 GEOIP", "api.override.example:443", cn, policy.ActionProxy, "special", "DOMAIN-SUFFIX,override.example"},
+		{"国外 IP 落到国外默认出口", "foreign.example:443", foreign, policy.ActionProxy, "hinet", "FINAL"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := e.MatchResolved(target(t, tc.host), tc.addrs)
+			if d.Action != tc.action || d.Egress != tc.egress || d.Rule != tc.rule {
+				t.Fatalf("got action=%s egress=%q rule=%q; want %s %q %q",
+					d.Action, d.Egress, d.Rule, tc.action, tc.egress, tc.rule)
 			}
 		})
 	}

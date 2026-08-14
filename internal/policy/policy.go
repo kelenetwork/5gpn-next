@@ -12,11 +12,13 @@
 package policy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kelenetwork/5gpn-next/internal/ruleset"
 )
@@ -75,14 +77,25 @@ type Engine struct {
 
 	// egressHasV6 决定 IPv6 字面量目标是否 fail-fast
 	egressHasV6 bool
+
+	// DNS 缓存用于“域名解析后再匹配 IP-CIDR/GEOIP”。
+	// Engine 在热重载时整体替换，缓存自然随规则生命周期清空。
+	resolveMu    sync.RWMutex
+	resolveCache map[string]resolveEntry
+}
+
+type resolveEntry struct {
+	addrs  []netip.Addr
+	expire time.Time
 }
 
 // New 返回默认引擎：final 走 proxy（其余国际出海）。
 func New() *Engine {
 	return &Engine{
-		final:      Decision{Action: ActionProxy, Rule: "FINAL", Index: -1},
-		domainSets: make(map[string]*ruleset.DomainSet),
-		cidrSets:   make(map[string]*ruleset.CIDRSet),
+		final:        Decision{Action: ActionProxy, Rule: "FINAL", Index: -1},
+		domainSets:   make(map[string]*ruleset.DomainSet),
+		cidrSets:     make(map[string]*ruleset.CIDRSet),
+		resolveCache: make(map[string]resolveEntry),
 	}
 }
 
@@ -229,15 +242,35 @@ func (t Target) IsIP() bool { return t.isIP }
 // Addr 返回 IP 字面量地址。
 func (t Target) Addr() netip.Addr { return t.addr }
 
-// Match 执行有序 first-match 判定。
+// Match 执行有序 first-match 判定。域名不做 DNS 解析；需要让
+// IP-CIDR/GEOIP 同时作用于域名时使用 MatchContext 或 MatchResolved。
 func (e *Engine) Match(t Target) Decision {
+	return e.matchResolved(t, nil)
+}
+
+// MatchContext 先解析域名，再按原始规则顺序同时匹配域名与目标 IP。
+// 正向结果缓存 5 分钟；解析失败时退回纯域名规则，不阻断连接。
+func (e *Engine) MatchContext(ctx context.Context, t Target) Decision {
+	if t.isIP || t.Host == "" {
+		return e.Match(t)
+	}
+	return e.MatchResolved(t, e.resolve(ctx, t.Host))
+}
+
+// MatchResolved 使用调用方已解析的地址参与 IP-CIDR/GEOIP 判定。
+// Android DoT 使用其上游 DNS 的真实应答调用此方法，避免重复解析。
+func (e *Engine) MatchResolved(t Target, addrs []netip.Addr) Decision {
+	return e.matchResolved(t, normalizeAddrs(addrs))
+}
+
+func (e *Engine) matchResolved(t Target, addrs []netip.Addr) Decision {
 	e.mu.RLock()
 	rules := e.rules
 	final := e.final
 	e.mu.RUnlock()
 
 	for i, r := range rules {
-		if !r.matches(t) {
+		if !r.matches(t, addrs) {
 			continue
 		}
 		return Decision{
@@ -250,7 +283,64 @@ func (e *Engine) Match(t Target) Decision {
 	return final
 }
 
-func (r Rule) matches(t Target) bool {
+func (e *Engine) resolve(ctx context.Context, host string) []netip.Addr {
+	now := time.Now()
+	e.resolveMu.RLock()
+	cached, ok := e.resolveCache[host]
+	e.resolveMu.RUnlock()
+	if ok && now.Before(cached.expire) {
+		return append([]netip.Addr(nil), cached.addrs...)
+	}
+
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupNetIP(rctx, "ip", host)
+	if err != nil {
+		return nil
+	}
+	addrs = normalizeAddrs(addrs)
+	if len(addrs) == 0 {
+		return nil
+	}
+	e.resolveMu.Lock()
+	e.resolveCache[host] = resolveEntry{
+		addrs:  append([]netip.Addr(nil), addrs...),
+		expire: now.Add(5 * time.Minute),
+	}
+	e.resolveMu.Unlock()
+	return addrs
+}
+
+func normalizeAddrs(in []netip.Addr) []netip.Addr {
+	out := make([]netip.Addr, 0, len(in))
+	seen := make(map[netip.Addr]struct{}, len(in))
+	for _, a := range in {
+		if !a.IsValid() {
+			continue
+		}
+		a = a.Unmap()
+		if _, ok := seen[a]; ok {
+			continue
+		}
+		seen[a] = struct{}{}
+		out = append(out, a)
+	}
+	return out
+}
+
+func (r Rule) matches(t Target, resolved []netip.Addr) bool {
+	matchAddr := func(fn func(netip.Addr) bool) bool {
+		if t.isIP && fn(t.addr) {
+			return true
+		}
+		for _, a := range resolved {
+			if fn(a) {
+				return true
+			}
+		}
+		return false
+	}
+
 	switch r.Kind {
 	case KindDomain:
 		return !t.isIP && t.Host == strings.ToLower(r.Value)
@@ -266,16 +356,16 @@ func (r Rule) matches(t Target) bool {
 		return !t.isIP && strings.Contains(t.Host, strings.ToLower(r.Value))
 
 	case KindIPCIDR:
-		return t.isIP && r.hasPfx && r.prefix.Contains(t.addr)
+		return r.hasPfx && matchAddr(r.prefix.Contains)
 
 	case KindGeoIP:
-		return t.isIP && r.cidrs != nil && r.cidrs.Match(t.addr)
+		return r.cidrs != nil && matchAddr(r.cidrs.Match)
 
 	case KindRuleSet:
-		if t.isIP {
-			return r.cidrs != nil && r.cidrs.Match(t.addr)
+		if !t.isIP && r.domains != nil && r.domains.Match(t.Host) {
+			return true
 		}
-		return r.domains != nil && r.domains.Match(t.Host)
+		return r.cidrs != nil && matchAddr(r.cidrs.Match)
 	}
 	return false
 }

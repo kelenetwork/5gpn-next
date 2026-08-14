@@ -27,7 +27,7 @@
 
   <section class="panel">
     <h2>国外默认出口</h2>
-    <p class="note">只决定未命中规则的国外流量；国内域名/IP 仍按内置规则 DIRECT，自定义分流规则保持独立。</p>
+    <p class="note">只决定国外未命中流量。KFC 本机出口表示使用服务器公网 IP；国内常用域名由描述文件在手机侧直连，其余域名解析 IP 后由 GEOIP 兜底；自定义规则始终优先。</p>
     <div id="egress-list" class="rows"></div>
 
     <div class="form">
@@ -47,7 +47,7 @@
       <label for="rule-input">添加规则</label>
       <input id="rule-input" type="text" placeholder="DOMAIN-SUFFIX,openai.com,proxy:node">
       <button class="btn" id="rule-add">添加</button>
-      <p class="hint">类型可用：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、RULE-SET、GEOIP；动作可用：direct、block、proxy:出口名</p>
+      <p class="hint">类型可用：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、RULE-SET、GEOIP；动作可用：direct（KFC 本机公网）、block、proxy:出口名</p>
     </div>
   </section>
 

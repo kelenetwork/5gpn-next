@@ -1,6 +1,10 @@
 package manage
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/kelenetwork/5gpn-next/internal/config"
+)
 
 func TestNormalizeTarget(t *testing.T) {
 	cases := map[string]string{
@@ -17,5 +21,12 @@ func TestNormalizeTarget(t *testing.T) {
 		if got := NormalizeTarget(in); got != want {
 			t.Errorf("NormalizeTarget(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestDisplayOfDirectUsesKFCName(t *testing.T) {
+	e := config.EgressConfig{Name: "DIRECT", Type: "direct"}
+	if got, want := displayOf(e), "KFC 本机出口"; got != want {
+		t.Fatalf("displayOf(DIRECT)=%q, want %q", got, want)
 	}
 }

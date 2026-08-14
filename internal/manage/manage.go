@@ -142,7 +142,9 @@ func (m *Manager) Status(version string) Status {
 	var es []EgressStatus
 	for _, e := range cfg.Egress {
 		proto := e.Proto
-		if proto == "" {
+		if e.Name == "DIRECT" && e.Type == "direct" {
+			proto = "本机公网"
+		} else if proto == "" {
 			proto = e.Type
 		}
 		es = append(es, EgressStatus{
@@ -263,6 +265,9 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 func displayOf(e config.EgressConfig) string {
 	if e.DisplayName != "" {
 		return e.DisplayName
+	}
+	if e.Name == "DIRECT" && e.Type == "direct" {
+		return "KFC 本机出口"
 	}
 	return e.Name
 }

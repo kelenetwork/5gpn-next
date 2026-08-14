@@ -77,7 +77,7 @@ function renderEgress(list, domesticReady) {
   box.textContent = '';
 
   if (domesticReady === false) {
-    box.appendChild(el('p', 'empty', '⚠ 国内直连规则未就绪：运行态已安全回落 DIRECT，代理出口暂不允许切换'));
+    box.appendChild(el('p', 'empty', '⚠ 国内规则未就绪：国外默认出口已安全回落 KFC 本机出口，代理出口暂不允许切换'));
   }
 
   if (!list.length) {

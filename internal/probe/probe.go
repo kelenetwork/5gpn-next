@@ -74,10 +74,12 @@ func (p *Prober) Run(ctx context.Context, target string) *trace.Trace {
 
 	// [2] 策略
 	t, _ := policy.ParseTarget(target)
-	dec := p.Policy.Match(t)
+	dec := p.Policy.MatchContext(ctx, t)
 	kind := "域名"
 	if t.IsIP() {
-		kind = "裸 IP，按 GEOIP 判定"
+		kind = "裸 IP，按 IP/GEOIP 判定"
+	} else if strings.HasPrefix(dec.Rule, "GEOIP,") || strings.HasPrefix(dec.Rule, "IP-CIDR,") {
+		kind = "域名已解析为目标 IP，再按 IP/GEOIP 判定"
 	}
 	switch dec.Action {
 	case policy.ActionBlock:

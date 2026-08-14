@@ -137,7 +137,7 @@ curl -fsSL https://raw.githubusercontent.com/kelenetwork/5gpn-next/main/uninstal
 
 📊 运行状态 · 📈 流量统计 · 🌐 国外默认出口 · 🧭 分流规则 · 🩺 连通诊断 · 📱 客户端接入 · 🖥 内网面板 · 🚀 一键升级/回退
 
-> “国外默认出口”只改变 `FINAL`：自定义分流规则优先，国内域名/IP 继续由内置规则 DIRECT。两套国内规则未就绪时会安全回落 DIRECT，并拒绝切到代理出口，避免退化成国内外全局代理。
+> “国外默认出口”只改变 `FINAL`：自定义分流规则优先；iOS 常用国内域名先由描述文件在手机侧直连，其余域名在网关解析目标 IP 后继续匹配 `GEOIP,cn`。出口列表中的 `KFC 本机出口`（内部兼容名仍为 `DIRECT`）表示使用 KFC 服务器公网 IP。
 
 ### 内网 Web 面板
 
@@ -162,7 +162,7 @@ https://<你的域名>:<端口>/
 ```
 [1] 入口   probe 本地发起                          ✅     0.0ms
 [2] 策略   RULE-SET,cn-domain [域名] → 直连         ✅     0.1ms
-[3] 出口   DIRECT（IPv6 能力=false）                ✅     0.0ms
+[3] 出口   KFC 本机出口（IPv6 能力=false）           ✅     0.0ms
 [4] 连接   TCP 36.51.224.126:443 已建立             ✅    59.6ms
 [5] 应用   TLS 1.2 证书校验通过                      ✅   109.9ms
 结论：正常（总计 169.7ms）
@@ -177,12 +177,12 @@ https://<你的域名>:<端口>/
 ```jsonc
 {
   "egress": [
-    { "name": "DIRECT", "type": "direct" },
+    { "name": "DIRECT", "type": "direct" }, // UI 显示为“KFC 本机出口”
     { "name": "node", "type": "socks5", "addr": "127.0.0.1:7891" }
   ],
   "rules": [
     "RULE-SET,cn-domain,direct",       // 国内域名直连
-    "GEOIP,cn,direct",                 // 国内 IP 直连
+    "GEOIP,cn,direct",                 // 裸 IP 或域名解析出的国内 IP
     "DOMAIN-SUFFIX,openai.com,proxy:node"
   ],
   "final": "proxy:node"                // 其余走节点

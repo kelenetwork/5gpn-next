@@ -161,7 +161,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	t, _ := policy.ParseTarget(target)
 	pol := s.Policy()
 	reg := s.Egress()
-	dec := pol.Match(t)
+	dec := pol.MatchContext(r.Context(), t)
 	actionName := "proxy"
 
 	switch dec.Action {

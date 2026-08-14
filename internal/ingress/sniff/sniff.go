@@ -114,7 +114,7 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 
 	// 策略判定
 	t, _ := policy.ParseTarget(target)
-	dec := s.Policy().Match(t)
+	dec := s.Policy().MatchContext(ctx, t)
 
 	var actionName string
 	switch dec.Action {
