@@ -1,0 +1,301 @@
+// Package relay 实现 Apple Network Relay 服务端（RFC 9298 / HTTP CONNECT）。
+//
+// P0 实测结论（iOS 26 真机）：
+//   - iOS 通过 HTTP/2 发起标准 CONNECT，authority 携带明确目的地，
+//     因此无需 SNI 嗅探，WhatsApp 这类无 SNI 协议从根上不再是问题。
+//   - iOS 安装 Relay 后会主动 GET /.well-known/pvd（RFC 8801），
+//     必须正确响应，否则会反复重试。
+//   - iOS 会把 IPv6 字面量交给 Relay；出口无 v6 时必须快速失败。
+package relay
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/kelenetwork/5gpn-next/internal/egress"
+	"github.com/kelenetwork/5gpn-next/internal/policy"
+	"github.com/kelenetwork/5gpn-next/internal/trace"
+)
+
+// TokenHeader 是描述文件 AdditionalHTTPHeaderFields 下发的鉴权头。
+const TokenHeader = "X-5gpn-Token"
+
+// Recorder 接收每条连接的决策记录。
+type Recorder interface {
+	Record(t *trace.Trace)
+}
+
+// Stats 是运行时计数。
+type Stats struct {
+	Connect    atomic.Int64
+	Blocked    atomic.Int64
+	AuthFail   atomic.Int64
+	DialFail   atomic.Int64
+	V6FastFail atomic.Int64
+	PvD        atomic.Int64
+	UDPAttempt atomic.Int64
+}
+
+// Server 是 Relay 入口。
+type Server struct {
+	Token    string
+	Policy   *policy.Engine
+	Egress   *egress.Registry
+	Recorder Recorder
+	Identity string // PvD identifier，通常为 Relay 主机名
+
+	// ProfilePath / ProfileBytes 提供描述文件下载端点（可为空）
+	ProfilePath  string
+	ProfileBytes []byte
+
+	Stats Stats
+
+	seq atomic.Uint64
+}
+
+// ServeHTTP 实现 http.Handler。
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 描述文件下载：iOS 下载时不会带 token，故置于鉴权之前，
+	// 路径含随机串本身即能力凭证。
+	if s.ProfilePath != "" && r.Method == http.MethodGet && r.URL.Path == s.ProfilePath {
+		w.Header().Set("Content-Type", "application/x-apple-aspen-config")
+		w.Header().Set("Content-Disposition", `attachment; filename="5gpn-next.mobileconfig"`)
+		w.Write(s.ProfileBytes)
+		return
+	}
+
+	if !s.authOK(r) {
+		s.Stats.AuthFail.Add(1)
+		http.Error(w, "forbidden", http.StatusProxyAuthRequired)
+		return
+	}
+
+	// RFC 8801 Provisioning Domain：iOS 装上 Relay 后会主动请求
+	if r.Method == http.MethodGet && r.URL.Path == "/.well-known/pvd" {
+		s.Stats.PvD.Add(1)
+		w.Header().Set("Content-Type", "application/pvd+json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifier": s.Identity,
+			"expires":    time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339),
+			"prefixes":   []string{},
+		})
+		return
+	}
+
+	// RFC 9298 UDP over HTTP：P0 未观察到 iOS 使用，先记录待 H3 阶段处理
+	if strings.HasPrefix(r.URL.Path, "/.well-known/masque/udp/") {
+		s.Stats.UDPAttempt.Add(1)
+		http.Error(w, "udp proxying not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	if r.Method != http.MethodConnect {
+		http.Error(w, "expect CONNECT", http.StatusBadRequest)
+		return
+	}
+
+	s.handleConnect(w, r)
+}
+
+func (s *Server) authOK(r *http.Request) bool {
+	if s.Token == "" {
+		return true
+	}
+	got := r.Header.Get(TokenHeader)
+	if got == "" {
+		if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
+			got = strings.TrimPrefix(a, "Bearer ")
+		}
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) == 1
+}
+
+func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
+	target := r.Host
+	if target == "" {
+		target = r.URL.Host
+	}
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		target = net.JoinHostPort(strings.Trim(target, "[]"), "443")
+	}
+
+	id := fmt.Sprintf("c%d", s.seq.Add(1))
+	tr := trace.New(id, target, clientIP(r.RemoteAddr))
+	defer func() {
+		if s.Recorder != nil {
+			s.Recorder.Record(tr)
+		}
+	}()
+
+	tr.Step(trace.StageIngress, trace.StatusOK, "relay/%s 已认证", r.Proto)
+
+	// ---- 策略判定 ----
+	t, _ := policy.ParseTarget(target)
+	dec := s.Policy.Match(t)
+
+	switch dec.Action {
+	case policy.ActionBlock:
+		s.Stats.Blocked.Add(1)
+		tr.Step(trace.StagePolicy, trace.StatusOK, "%s → 拦截", dec.Rule)
+		http.Error(w, "blocked by policy", http.StatusForbidden)
+		return
+	case policy.ActionDirect:
+		tr.Step(trace.StagePolicy, trace.StatusOK, "%s → 直连", dec.Rule)
+	default:
+		tr.Step(trace.StagePolicy, trace.StatusOK, "%s → 代理:%s", dec.Rule, orDefault(dec.Egress, "默认"))
+	}
+
+	// ---- 选出口 ----
+	var dialer egress.Dialer
+	if dec.Action == policy.ActionDirect {
+		dialer = s.Egress.Direct()
+	} else {
+		d, ok := s.Egress.Get(dec.Egress)
+		if !ok {
+			tr.Fail(trace.StageEgress, fmt.Errorf("出口 %q 不存在", dec.Egress),
+				"出口缺失，已回退 %s", d.Name())
+		}
+		dialer = d
+	}
+	if tr.OK() {
+		tr.Step(trace.StageEgress, trace.StatusOK, "%s (ipv6=%v)", dialer.Name(), dialer.HasIPv6())
+	}
+
+	// ---- 拨号 ----
+	s.Stats.Connect.Add(1)
+	ctx, cancel := context.WithTimeout(r.Context(), egress.DialTimeout)
+	defer cancel()
+
+	up, err := dialer.DialContext(ctx, "tcp", target)
+	if err != nil {
+		if errors.Is(err, egress.ErrNoIPv6) {
+			s.Stats.V6FastFail.Add(1)
+			tr.Fail(trace.StageConnect, err, "IPv6 目标快速失败，促使客户端回落 IPv4")
+			// 502 让 Happy Eyeballs 立刻改试 IPv4
+			http.Error(w, "no ipv6 egress", http.StatusBadGateway)
+			return
+		}
+		s.Stats.DialFail.Add(1)
+		tr.Fail(trace.StageConnect, err, "拨号 %s 失败", target)
+		http.Error(w, "upstream dial failed", http.StatusBadGateway)
+		return
+	}
+	defer up.Close()
+	tr.Step(trace.StageConnect, trace.StatusOK, "TCP %s 已建立", up.RemoteAddr())
+
+	// ---- 建立隧道 ----
+	if r.ProtoMajor == 1 {
+		s.tunnelH1(w, up, tr)
+		return
+	}
+	s.tunnelH2(w, r, up, tr)
+}
+
+// tunnelH2 处理 HTTP/2 CONNECT，这是 iOS Relay 的实际路径。
+func (s *Server) tunnelH2(w http.ResponseWriter, r *http.Request, up net.Conn, tr *trace.Trace) {
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	var upN, downN int64
+	done := make(chan struct{}, 2)
+
+	go func() {
+		n, _ := io.Copy(up, r.Body)
+		atomicAdd(&upN, n)
+		closeWrite(up)
+		done <- struct{}{}
+	}()
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			nr, er := up.Read(buf)
+			if nr > 0 {
+				nw, ew := w.Write(buf[:nr])
+				atomicAdd(&downN, int64(nw))
+				if flusher != nil {
+					flusher.Flush()
+				}
+				if ew != nil {
+					break
+				}
+			}
+			if er != nil {
+				break
+			}
+		}
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+
+	tr.Step(trace.StageApp, trace.StatusOK, "隧道关闭 up=%dB down=%dB", upN, downN)
+}
+
+// tunnelH1 处理 HTTP/1.1 CONNECT。
+//
+// Go 的 h1 服务端必须 Hijack 才能做双向隧道，
+// 用 ResponseWriter 流式写会得到零字节隧道（P0 踩过）。
+func (s *Server) tunnelH1(w http.ResponseWriter, up net.Conn, tr *trace.Trace) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		tr.Fail(trace.StageApp, errors.New("hijack unsupported"), "h1 隧道无法建立")
+		http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+		return
+	}
+	cli, buf, err := hj.Hijack()
+	if err != nil {
+		tr.Fail(trace.StageApp, err, "hijack 失败")
+		return
+	}
+	defer cli.Close()
+
+	if _, err := buf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		tr.Fail(trace.StageApp, err, "写 200 失败")
+		return
+	}
+	buf.Flush()
+
+	var upN, downN int64
+	done := make(chan struct{}, 2)
+	go func() { n, _ := io.Copy(up, buf); atomicAdd(&upN, n); closeWrite(up); done <- struct{}{} }()
+	go func() { n, _ := io.Copy(cli, up); atomicAdd(&downN, n); closeWrite(cli); done <- struct{}{} }()
+	<-done
+	<-done
+
+	tr.Step(trace.StageApp, trace.StatusOK, "隧道关闭 up=%dB down=%dB", upN, downN)
+}
+
+func atomicAdd(dst *int64, n int64) { *dst += n }
+
+func closeWrite(c io.Closer) {
+	type cw interface{ CloseWrite() error }
+	if x, ok := c.(cw); ok {
+		x.CloseWrite()
+	}
+}
+
+func clientIP(remote string) string {
+	if h, _, err := net.SplitHostPort(remote); err == nil {
+		return h
+	}
+	return remote
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
