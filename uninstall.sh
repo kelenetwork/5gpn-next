@@ -13,12 +13,13 @@ PURGE=0
 say() { printf '  %s\n' "$*"; }
 
 echo "==> 停止并禁用服务"
+# 无条件停止：不要用 `list-unit-files | grep -q` 做前置判断。
+# grep -q 命中即退出会让 systemctl 收到 SIGPIPE，在 pipefail 下条件为假，
+# 结果跳过停服务却仍删掉 unit 文件，进程沦为孤儿。
 for u in 5gpn-next 5gpn-next-nft mihomo-5gpn; do
-  if systemctl list-unit-files 2>/dev/null | grep -q "^${u}.service"; then
-    systemctl disable --now "${u}.service" >/dev/null 2>&1 || true
-    say "已停止 ${u}"
-  fi
+  systemctl disable --now "${u}.service" >/dev/null 2>&1 || true
 done
+say "已停止相关服务"
 
 echo "==> 移除 systemd 单元"
 for u in 5gpn-next 5gpn-next-nft mihomo-5gpn; do
@@ -27,9 +28,19 @@ done
 systemctl daemon-reload
 systemctl reset-failed >/dev/null 2>&1 || true
 
+# 兜底：确认没有孤儿进程残留（unit 已删但进程仍在会继续占端口）
+for pat in /usr/local/bin/5gpnd /usr/local/bin/mihomo; do
+  if pgrep -f "$pat" >/dev/null 2>&1; then
+    warn "检测到残留进程 $pat，正在终止"
+    pkill -f "$pat" >/dev/null 2>&1 || true
+    sleep 1
+    pkill -9 -f "$pat" >/dev/null 2>&1 || true
+  fi
+done
+
 echo "==> 清理防火墙规则"
 # 只删本项目加的规则，按 comment 精确定位，绝不整表 flush
-for table in "inet 5gpn" "inet pdg"; do
+for table in "inet fgpn" "inet pdg"; do
   set -- $table
   fam=$1; tbl=$2
   nft list chain "$fam" "$tbl" input >/dev/null 2>&1 || continue
@@ -42,8 +53,8 @@ for table in "inet 5gpn" "inet pdg"; do
   done
 done
 # 本项目自建的独立表可整表删除
-if nft list table inet 5gpn >/dev/null 2>&1; then
-  nft delete table inet 5gpn 2>/dev/null && say "已删除 nft 表 inet 5gpn"
+if nft list table inet fgpn >/dev/null 2>&1; then
+  nft delete table inet fgpn 2>/dev/null && say "已删除 nft 表 inet fgpn"
 fi
 
 echo "==> 移除二进制"

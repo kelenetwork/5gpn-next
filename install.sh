@@ -80,12 +80,33 @@ PUBIP=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
 DOMAIN=$(FGPN_DOMAIN="${FGPN_DOMAIN:-}" ask FGPN_DOMAIN "网关域名（需已 A 记录指向本机）")
 [ -n "$DOMAIN" ] || die "域名不能为空"
 
-EMAIL=$(FGPN_EMAIL="${FGPN_EMAIL:-}" ask FGPN_EMAIL "证书邮箱" "admin@${DOMAIN#*.}")
+echo
+dim "证书邮箱：用于接收证书到期提醒，可留空。"
+EMAIL=$(FGPN_EMAIL="${FGPN_EMAIL:-}" ask FGPN_EMAIL "证书邮箱" "")
+if [ -z "$EMAIL" ]; then
+  CERT_EMAIL_ARG="--register-unsafely-without-email"
+  dim "未填写邮箱，将以无邮箱方式注册（收不到到期提醒）"
+else
+  CERT_EMAIL_ARG="--email $EMAIL"
+fi
 
 echo
 dim "落地节点：外网流量的出口。留空则由本机直出（被墙目标将无法访问）。"
 dim "支持 ss:// vmess:// vless:// trojan:// hysteria2:// 等 mihomo 可解析的链接。"
 NODE=$(FGPN_NODE="${FGPN_NODE:-}" ask FGPN_NODE "落地节点链接（可留空）")
+
+echo
+dim "Telegram Bot：在聊天窗口查看状态、增删出口、改分流、跑诊断、收告警。"
+dim "先找 @BotFather 建 Bot 拿 Token，再找 @userinfobot 查你的数字 ID。"
+BOT_TK=$(FGPN_BOT_TOKEN="${FGPN_BOT_TOKEN:-}" ask FGPN_BOT_TOKEN "Bot Token（可留空跳过）")
+BOT_IDS=""
+if [ -n "$BOT_TK" ]; then
+  BOT_IDS=$(FGPN_BOT_ADMINS="${FGPN_BOT_ADMINS:-}" ask FGPN_BOT_ADMINS "你的 Telegram 数字 ID（多个用英文逗号分隔）")
+  if [ -z "$BOT_IDS" ]; then
+    warn "未填写管理员 ID，Bot 不会响应任何人，已跳过 Bot 配置"
+    BOT_TK=""
+  fi
+fi
 
 # 域名解析校验
 RESOLVED=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
@@ -150,11 +171,12 @@ else
       || die "certbot 安装失败，请手动安装后重试"
   }
   # HTTP-01 需要 80 端口，临时放行
-  nft list chain inet 5gpn input >/dev/null 2>&1 && \
-    nft add rule inet 5gpn input tcp dport 80 accept comment '"5gpn-acme-tmp"' 2>/dev/null || true
+  nft list chain inet fgpn input >/dev/null 2>&1 && \
+    nft add rule inet fgpn input tcp dport 80 accept comment '"5gpn-acme-tmp"' 2>/dev/null || true
 
+  # shellcheck disable=SC2086
   certbot certonly --standalone --non-interactive --agree-tos \
-    --email "$EMAIL" -d "$DOMAIN" --keep-until-expiring >/dev/null 2>&1 \
+    $CERT_EMAIL_ARG -d "$DOMAIN" --keep-until-expiring >/dev/null 2>&1 \
     || die "证书签发失败。请确认：域名已指向本机、80 端口公网可达、云厂商安全组已放行 80"
   ok "证书签发成功"
 fi
@@ -245,6 +267,9 @@ step "生成配置"
 
 TOKEN=$(head -c 20 /dev/urandom | od -An -tx1 | tr -d ' \n')
 DLPATH="/dl/$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')/5gpn-next.mobileconfig"
+# 面板登录令牌与 Bot 管理员 JSON 数组
+PANELTOK=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+BOT_IDS_JSON=$(printf '%s' "$BOT_IDS" | tr -d ' ' | sed 's/,\{2,\}/,/g; s/^,//; s/,$//')
 
 if [ -s "$CFGDIR/config.json" ]; then
   cp -a "$CFGDIR/config.json" "$CFGDIR/config.json.bak.$(date -u +%Y%m%dT%H%M%SZ)"
@@ -289,6 +314,15 @@ cat > "$CFGDIR/config.json" <<EOF
     }
   ],
   "excluded_domains": [],
+  "bot": {
+    "token": "${BOT_TK}",
+    "admins": [${BOT_IDS_JSON}]
+  },
+  "panel": {
+    "enabled": true,
+    "token": "${PANELTOK}"
+  },
+  "client_cidr": "${CLIENT_CIDR}",
   "log_path": "${LOGDIR}/trace.jsonl"
 }
 EOF
@@ -299,10 +333,11 @@ ok "配置已写入 $CFGDIR/config.json"
 # ---------------------------------------------------------------- 6. 防火墙
 step "配置防火墙"
 
-# 使用独立表 inet 5gpn，不触碰其它表（Docker / fail2ban / 既有规则均不受影响）
-nft list table inet 5gpn >/dev/null 2>&1 && nft delete table inet 5gpn 2>/dev/null || true
+# 使用独立表，不触碰其它表（Docker / fail2ban / 既有规则均不受影响）
+# 表名必须以字母开头：nftables 标识符不允许数字开头，"5gpn" 会解析失败
+nft list table inet fgpn >/dev/null 2>&1 && nft delete table inet fgpn 2>/dev/null || true
 nft -f - <<EOF
-table inet 5gpn {
+table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
@@ -315,9 +350,9 @@ cat > "$CFGDIR/nft-restore.sh" <<EOF
 #!/bin/bash
 # 幂等补回放行规则（开机及防火墙重载后执行）
 set -uo pipefail
-nft list table inet 5gpn >/dev/null 2>&1 && exit 0
+nft list table inet fgpn >/dev/null 2>&1 && exit 0
 nft -f - <<'RULES'
-table inet 5gpn {
+table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
@@ -400,6 +435,12 @@ for t in weibo.com chatgpt.com; do
   fi
 done
 
+if [ -n "$BOT_TK" ]; then
+  BOT_HINT="已启用。向你的 Bot 发送 /start 打开菜单。"
+else
+  BOT_HINT="未配置。如需启用：编辑 ${CFGDIR}/config.json 的 bot 段，再 systemctl restart 5gpn-next"
+fi
+
 # ---------------------------------------------------------------- 完成
 cat <<EOF
 
@@ -413,6 +454,14 @@ $(printf '%s' "$C_OK")━━━━━━━━━━━━━━━━━━━�
     https://${DOMAIN}:${LISTEN_PORT}${DLPATH}
 
     安装后：设置 → 通用 → VPN 与设备管理 → 安装描述文件
+
+  内网 Web 面板
+    https://${DOMAIN}:${LISTEN_PORT}/panel
+    登录令牌：${PANELTOK}
+    仅内网卡来源可访问，公网无法连接。
+
+  Telegram Bot
+    ${BOT_HINT}
 
   常用命令
     5gpnd probe -c ${CFGDIR}/config.json <域名>   诊断某个目标

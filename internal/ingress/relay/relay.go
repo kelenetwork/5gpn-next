@@ -48,10 +48,13 @@ type Stats struct {
 // Server 是 Relay 入口。
 type Server struct {
 	Token    string
-	Policy   *policy.Engine
-	Egress   *egress.Registry
 	Recorder Recorder
 	Identity string // PvD identifier，通常为 Relay 主机名
+
+	// 策略与出口用原子指针持有：热重载时整体替换指针，
+	// 绝不复制含 sync.RWMutex 的结构体（那会造成数据竞争）。
+	pol atomic.Pointer[policy.Engine]
+	eg  atomic.Pointer[egress.Registry]
 
 	// ProfilePath / ProfileBytes 提供描述文件下载端点（可为空）
 	ProfilePath  string
@@ -61,6 +64,18 @@ type Server struct {
 
 	seq atomic.Uint64
 }
+
+// SetRuntime 原子替换策略引擎与出口注册表，用于配置热重载。
+func (s *Server) SetRuntime(p *policy.Engine, e *egress.Registry) {
+	s.pol.Store(p)
+	s.eg.Store(e)
+}
+
+// Policy 返回当前策略引擎。
+func (s *Server) Policy() *policy.Engine { return s.pol.Load() }
+
+// Egress 返回当前出口注册表。
+func (s *Server) Egress() *egress.Registry { return s.eg.Load() }
 
 // ServeHTTP 实现 http.Handler。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +155,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 策略判定 ----
 	t, _ := policy.ParseTarget(target)
-	dec := s.Policy.Match(t)
+	pol := s.Policy()
+	reg := s.Egress()
+	dec := pol.Match(t)
 
 	switch dec.Action {
 	case policy.ActionBlock:
@@ -157,9 +174,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// ---- 选出口 ----
 	var dialer egress.Dialer
 	if dec.Action == policy.ActionDirect {
-		dialer = s.Egress.Direct()
+		dialer = reg.Direct()
 	} else {
-		d, ok := s.Egress.Get(dec.Egress)
+		d, ok := reg.Get(dec.Egress)
 		if !ok {
 			tr.Fail(trace.StageEgress, fmt.Errorf("出口 %q 不存在", dec.Egress),
 				"出口缺失，已回退 %s", d.Name())

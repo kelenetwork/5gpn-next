@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>5gpn-NEXT 管理面板</title>
+<link rel="stylesheet" href="/panel/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <span class="brand">5gpn<span class="brand-dim">-NEXT</span></span>
+    <span class="ver">{{.Version}}</span>
+    <a class="logout" href="/panel/logout">退出</a>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="panel">
+    <h2>运行状态</h2>
+    <div class="stat-grid" id="stat-grid">
+      <div class="stat"><span class="stat-label">加载中</span><span class="stat-value">—</span></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>出口</h2>
+    <p class="note">当前生效的出口决定外网流量从哪里出去。</p>
+    <div id="egress-list" class="rows"></div>
+
+    <div class="form">
+      <label for="egress-link">添加出口</label>
+      <textarea id="egress-link" rows="2"
+        placeholder="粘贴节点分享链接，支持 ss:// vless:// vmess:// trojan:// hysteria2:// tuic:// socks5://"></textarea>
+      <button class="btn" id="egress-add">添加</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>分流规则</h2>
+    <p class="note">按顺序匹配，命中即停止。新增的规则会插入到最前面。</p>
+    <div id="rules-list" class="rows"></div>
+
+    <div class="form">
+      <label for="rule-input">添加规则</label>
+      <input id="rule-input" type="text" placeholder="DOMAIN-SUFFIX,openai.com,proxy:node">
+      <button class="btn" id="rule-add">添加</button>
+      <p class="hint">类型可用：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、RULE-SET、GEOIP；动作可用：direct、block、proxy:出口名</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>诊断</h2>
+    <p class="note">逐层检查入口、策略、出口、连接与应用层，失败时会指出具体哪一层。</p>
+    <div class="form form-inline">
+      <input id="probe-target" type="text" placeholder="youtube.com">
+      <button class="btn" id="probe-run">开始诊断</button>
+    </div>
+    <pre id="probe-out" class="probe-out" hidden></pre>
+  </section>
+
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/panel/app.js"></script>
+</body>
+</html>

@@ -31,8 +31,33 @@ type Config struct {
 	// 手机侧直连域名（写进描述文件 ExcludedDomains）
 	ExcludedDomains []string `json:"excluded_domains"`
 
+	// Telegram Bot（可选）
+	Bot BotConfig `json:"bot"`
+
+	// 内网 Web 面板
+	Panel PanelConfig `json:"panel"`
+
+	// 客户端来源网段（用于面板访问控制与提示）
+	ClientCIDR string `json:"client_cidr"`
+
 	// 日志
 	LogPath string `json:"log_path"`
+}
+
+// BotConfig 是 Telegram 管理机器人配置。
+type BotConfig struct {
+	// Token 为空时不启用 Bot
+	Token string `json:"token"`
+	// Admins 是允许操作的 Telegram 数字 ID；为空时 Bot 不响应任何人
+	Admins []int64 `json:"admins"`
+}
+
+// PanelConfig 是内网 Web 面板配置。
+type PanelConfig struct {
+	// Enabled 为 false 时完全不挂载面板路由
+	Enabled bool `json:"enabled"`
+	// Token 是登录令牌
+	Token string `json:"token"`
 }
 
 // RelayConfig 是 Relay 入口配置。
@@ -85,8 +110,10 @@ func Default() *Config {
 			"RULE-SET,cn-domain,direct",
 			"GEOIP,cn,direct",
 		},
-		Final:   "proxy",
-		LogPath: "/var/log/5gpn-next/trace.jsonl",
+		Final:      "proxy",
+		ClientCIDR: "172.22.0.0/16",
+		Panel:      PanelConfig{Enabled: true},
+		LogPath:    "/var/log/5gpn-next/trace.jsonl",
 		RuleSets: []RuleSetConfig{
 			{Name: "cn-domain", Kind: "domain", IntervalHours: 24,
 				URL: "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt"},
@@ -151,6 +178,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Final == "" {
 		return fmt.Errorf("final 不能为空")
+	}
+	if c.Bot.Token != "" && len(c.Bot.Admins) == 0 {
+		return fmt.Errorf("已配置 bot.token 但 bot.admins 为空，Bot 将不响应任何人")
+	}
+	if c.Panel.Enabled && c.Panel.Token == "" {
+		return fmt.Errorf("面板已启用但 panel.token 为空")
 	}
 	if strings.HasPrefix(c.Final, "proxy:") {
 		name := strings.TrimPrefix(c.Final, "proxy:")
