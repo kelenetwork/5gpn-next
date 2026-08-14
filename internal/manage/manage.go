@@ -6,6 +6,7 @@ package manage
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -176,10 +177,12 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 		}
 	}
 
-	// 每个出口一个独立 mihomo 实例，端口顺延
+	// 每个出口一个独立 mihomo 实例，端口顺延。
+	// 配置放 /var/lib：服务开启 ProtectSystem=full 后 /etc 只读，
+	// 运行期写 /etc/mihomo-5gpn 会直接 EROFS。
 	port := 7891 + len(m.Cfg.Egress)
-	dir := "/etc/mihomo-5gpn/" + name
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir := egressDir + "/" + name
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
 	yaml, err := n.MihomoConfig(port)
@@ -189,7 +192,7 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 	if err := os.WriteFile(dir+"/config.yaml", []byte(yaml), 0o600); err != nil {
 		return "", err
 	}
-	if err := writeMihomoUnit(name, dir); err != nil {
+	if err := ensureMihomoUnit(); err != nil {
 		return "", err
 	}
 	if err := systemctl("enable", "--now", "mihomo-5gpn@"+name+".service"); err != nil {
@@ -229,6 +232,8 @@ func (m *Manager) RemoveEgress(name string) error {
 	}
 
 	_ = systemctl("disable", "--now", "mihomo-5gpn@"+name+".service")
+	_ = os.RemoveAll(egressDir + "/" + name)
+	// 旧版本的配置位置（沙箱内只读，删不掉也无妨）
 	_ = os.RemoveAll("/etc/mihomo-5gpn/" + name)
 
 	m.Cfg.Egress = append(m.Cfg.Egress[:idx], m.Cfg.Egress[idx+1:]...)
@@ -400,11 +405,13 @@ func (m *Manager) saveAndReloadLocked() error {
 	return nil
 }
 
-func writeMihomoUnit(name, dir string) error {
-	// 使用模板单元，避免每个出口写一个文件
-	const tmplPath = "/etc/systemd/system/mihomo-5gpn@.service"
-	if _, err := os.Stat(tmplPath); os.IsNotExist(err) {
-		unit := `[Unit]
+// egressDir 存放各出口的 mihomo 配置与运行数据。
+// 必须位于 /var/lib：主服务 ProtectSystem=full 下 /etc 只读。
+const egressDir = "/var/lib/mihomo-5gpn"
+
+const mihomoUnitPath = "/etc/systemd/system/mihomo-5gpn@.service"
+
+const mihomoUnitContent = `[Unit]
 Description=mihomo egress %i for 5gpn-next
 After=network-online.target
 Wants=network-online.target
@@ -413,7 +420,7 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mihomo -d /var/lib/mihomo-5gpn/%i -f /etc/mihomo-5gpn/%i/config.yaml
+ExecStart=/usr/local/bin/mihomo -d /var/lib/mihomo-5gpn/%i -f /var/lib/mihomo-5gpn/%i/config.yaml
 Restart=on-failure
 RestartSec=3s
 NoNewPrivileges=true
@@ -427,14 +434,37 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 `
-		if err := os.WriteFile(tmplPath, []byte(unit), 0o644); err != nil {
-			return err
-		}
-		if err := systemctl("daemon-reload"); err != nil {
-			return err
-		}
+
+// ensureMihomoUnit 确保模板单元存在且为当前版本内容。
+// 旧版本模板引用 /etc/mihomo-5gpn/%i，需要覆盖迁移。
+func ensureMihomoUnit() error {
+	if b, err := os.ReadFile(mihomoUnitPath); err == nil && string(b) == mihomoUnitContent {
+		return nil
 	}
-	return os.MkdirAll("/var/lib/mihomo-5gpn/"+name, 0o750)
+	if err := writeFileMaybeSandboxed(mihomoUnitPath, []byte(mihomoUnitContent), 0o644); err != nil {
+		return fmt.Errorf("写入 mihomo 模板单元失败: %w", err)
+	}
+	return systemctl("daemon-reload")
+}
+
+// writeFileMaybeSandboxed 写文件；直接写失败（典型为沙箱内 /etc 只读）时，
+// 通过 systemd-run 请求 PID 1 在沙箱外代写。内容经 base64 传递，避免引号问题。
+func writeFileMaybeSandboxed(path string, data []byte, mode os.FileMode) error {
+	if err := os.WriteFile(path, data, mode); err == nil {
+		return nil
+	}
+	b64 := base64.StdEncoding.EncodeToString(data)
+	script := fmt.Sprintf("echo %s | base64 -d > %q && chmod %o %q", b64, path, mode, path)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemd-run",
+		"--quiet", "--wait", "--collect",
+		"--property=Type=oneshot",
+		"/bin/sh", "-c", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func systemctl(args ...string) error {
