@@ -100,14 +100,6 @@ dim "Telegram Bot：在聊天窗口查看状态、增删出口、改分流、跑
 dim "先找 @BotFather 建 Bot 拿 Token，再找 @userinfobot 查你的数字 ID。"
 BOT_TK=$(FGPN_BOT_TOKEN="${FGPN_BOT_TOKEN:-}" ask FGPN_BOT_TOKEN "Bot Token（可留空跳过）")
 BOT_IDS=""
-if [ "$ANDROID_ON" = "true" ]; then
-  ANDROID_HINT="
-    Android：设置 → 网络和互联网 → 私人 DNS，填入 ${DOMAIN}"
-else
-  ANDROID_HINT="
-    Android：未启用。如需支持，把 config.json 的 android.enabled 改为 true"
-fi
-
 if [ -n "$BOT_TK" ]; then
   BOT_IDS=$(FGPN_BOT_ADMINS="${FGPN_BOT_ADMINS:-}" ask FGPN_BOT_ADMINS "你的 Telegram 数字 ID（多个用英文逗号分隔）")
   if [ -z "$BOT_IDS" ]; then
@@ -498,6 +490,14 @@ for t in weibo.com chatgpt.com; do
     warn "$t 诊断未通过，稍后运行：5gpnd probe -c $CFGDIR/config.json $t"
   fi
 done
+
+if [ "$ANDROID_ON" = "true" ]; then
+  ANDROID_HINT="
+    Android：设置 → 网络和互联网 → 私人 DNS，填入 ${DOMAIN}"
+else
+  ANDROID_HINT="
+    Android：未启用。如需支持，把 config.json 的 android.enabled 改为 true"
+fi
 
 if [ -n "$BOT_TK" ]; then
   BOT_HINT="已启用。向你的 Bot 发送 /start 打开菜单。"
