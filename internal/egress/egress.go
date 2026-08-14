@@ -270,6 +270,21 @@ func (r *Registry) Get(name string) (Dialer, bool) {
 	return d, true
 }
 
+// HasProxy 报告是否存在任何非直连出口。
+//
+// 用于区分两种情况：策略判定为 proxy 且真有落地节点，
+// 还是策略判定为 proxy 但实际只能本机直出（被墙目标必然失败）。
+func (r *Registry) HasProxy() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, d := range r.dialers {
+		if _, isDirect := d.(*Direct); !isDirect {
+			return true
+		}
+	}
+	return false
+}
+
 // Direct 返回直出出口。
 func (r *Registry) Direct() Dialer {
 	r.mu.RLock()

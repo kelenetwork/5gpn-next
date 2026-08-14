@@ -1,0 +1,39 @@
+{
+  "relay": {
+    "listen": ":20444",
+    "host": "kfc.ke1e.de",
+    "cert_file": "/etc/letsencrypt/live/kfc.ke1e.de/fullchain.pem",
+    "key_file": "/etc/letsencrypt/live/kfc.ke1e.de/privkey.pem",
+    "token": "REPLACE_ME",
+    "profile_path": "/dl/REPLACE_RANDOM/5gpn-next.mobileconfig"
+  },
+  "egress": [
+    { "name": "DIRECT", "type": "direct" }
+  ],
+  "rules": [
+    "IP-CIDR,10.0.0.0/8,direct",
+    "IP-CIDR,172.16.0.0/12,direct",
+    "IP-CIDR,192.168.0.0/16,direct",
+    "IP-CIDR,127.0.0.0/8,direct",
+    "IP-CIDR,169.254.0.0/16,direct",
+    "RULE-SET,cn-domain,direct",
+    "GEOIP,cn,direct"
+  ],
+  "final": "proxy",
+  "rulesets": [
+    {
+      "name": "cn-domain",
+      "kind": "domain",
+      "interval_hours": 24,
+      "url": "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt"
+    },
+    {
+      "name": "geoip:cn",
+      "kind": "ipcidr",
+      "interval_hours": 24,
+      "url": "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/cn.txt"
+    }
+  ],
+  "excluded_domains": [],
+  "log_path": "/var/log/5gpn-next/trace.jsonl"
+}

@@ -30,6 +30,9 @@ const (
 	StatusOK      Status = "ok"
 	StatusFail    Status = "fail"
 	StatusSkipped Status = "skipped"
+	// StatusWarn 表示该层可继续，但存在需要用户知晓的隐患。
+	// 例如策略要求走代理却未配置任何代理出口。
+	StatusWarn Status = "warn"
 )
 
 // Step 是一层的记录。
@@ -161,6 +164,7 @@ func (t *Trace) Human() string {
 		StatusOK:      "✅",
 		StatusFail:    "❌",
 		StatusSkipped: "⏭",
+		StatusWarn:    "⚠️",
 	}
 	s := ""
 	for i, st := range t.Steps() {
