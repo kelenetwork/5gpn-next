@@ -20,6 +20,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,9 +54,16 @@ type Bot struct {
 	pendingGreet bool
 }
 
+// offsetFile 持久化长轮询 offset。
+//
+// 升级/回退会重启本进程；若 offset 只存内存，Telegram 会把
+// 尚未确认的「立即升级」回调重投给新进程，形成升级→重启→再升级
+// 的死循环。落盘后重启不再重放已处理的更新。
+const offsetFile = "/var/lib/5gpn-next/bot-offset"
+
 // New 构造 Bot。
 func New(token string, admins []int64, m *manage.Manager, version string) *Bot {
-	return &Bot{
+	b := &Bot{
 		Token:     token,
 		Admins:    admins,
 		Manager:   m,
@@ -65,6 +73,12 @@ func New(token string, admins []int64, m *manage.Manager, version string) *Bot {
 		promptMsg: make(map[int64]int64),
 		greeted:   make(map[int64]bool),
 	}
+	if raw, err := os.ReadFile(offsetFile); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil && n > 0 {
+			b.offset = n
+		}
+	}
+	return b
 }
 
 // Run 启动长轮询，直到 ctx 取消。
@@ -164,10 +178,18 @@ func (b *Bot) getUpdates(ctx context.Context) ([]update, error) {
 	if err := json.Unmarshal(raw, &ups); err != nil {
 		return nil, err
 	}
+	advanced := false
 	for _, u := range ups {
 		if u.UpdateID >= b.offset {
 			b.offset = u.UpdateID + 1
+			advanced = true
 		}
+	}
+	// 在处理任何更新之前先落盘：即便处理过程中进程被重启
+	//（典型：自升级），这批更新也不会被 Telegram 重投。
+	if advanced {
+		_ = os.MkdirAll("/var/lib/5gpn-next", 0o750)
+		_ = os.WriteFile(offsetFile, []byte(strconv.FormatInt(b.offset, 10)+"\n"), 0o640)
 	}
 	return ups, nil
 }

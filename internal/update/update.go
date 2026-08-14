@@ -121,6 +121,16 @@ func (m *Manager) ShouldNotify(tag string) bool {
 // 流程：下载 → 校验 SHA256 → 备份当前 → 原子替换 → 重启 → 验证。
 // 重启后若服务未起来，自动回退到备份版本。
 func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
+	// 幂等保护：目标不比当前新一律拒绝。
+	// 典型场景是 Telegram 重投旧的「立即升级」回调 ——
+	// 若不拦截会造成 升级→重启→重放→再升级 的死循环。
+	if tag == m.Current {
+		return "", fmt.Errorf("当前已是 %s，无需重复安装", tag)
+	}
+	if !Newer(tag, m.Current) {
+		return "", fmt.Errorf("目标 %s 不比当前 %s 新，已忽略；如需降级请使用回退功能", tag, m.Current)
+	}
+
 	m.mu.Lock()
 	if m.busy {
 		m.mu.Unlock()
