@@ -19,7 +19,9 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/node"
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/probe"
+	"github.com/kelenetwork/5gpn-next/internal/stats"
 	"github.com/kelenetwork/5gpn-next/internal/trace"
+	"github.com/kelenetwork/5gpn-next/internal/update"
 )
 
 // StatsSource 提供运行时计数。
@@ -43,7 +45,27 @@ type Manager struct {
 	// Reload 由主程序注入：配置变更后重建策略与出口
 	Reload func() error
 
+	// Traffic 是流量统计存储（可为空）
+	Traffic *stats.Store
+
+	// Updater 负责版本检查/升级/回退（可为空）
+	Updater *update.Manager
+
+	// ProfileBytes 返回当前 iOS 描述文件内容，供 Bot 以文件形式下发
+	ProfileBytes func() ([]byte, error)
+
+	// AndroidInfo 返回 Android 接入所需信息
+	AndroidInfo func() AndroidGuide
+
 	started time.Time
+}
+
+// AndroidGuide 是 Android 接入指引。
+type AndroidGuide struct {
+	Enabled   bool   `json:"enabled"`
+	DoTHost   string `json:"dot_host"`
+	GatewayIP string `json:"gateway_ip"`
+	Note      string `json:"note"`
 }
 
 // New 构造 Manager。
@@ -275,6 +297,50 @@ func (m *Manager) Probe(ctx context.Context, target string) *trace.Trace {
 	p := &probe.Prober{Policy: m.Policy, Egress: m.Egress}
 	m.mu.RUnlock()
 	return p.Run(ctx, target)
+}
+
+// ---------- 流量 ----------
+
+// Traffic 返回流量摘要；未启用统计时返回零值与 false。
+func (m *Manager) TrafficSummary() (stats.Summary, bool) {
+	if m.Traffic == nil {
+		return stats.Summary{}, false
+	}
+	return m.Traffic.Summary(7, 10), true
+}
+
+// ---------- 更新 ----------
+
+// CheckUpdate 查询是否有新版本。
+func (m *Manager) CheckUpdate(ctx context.Context) (bool, *update.Release, error) {
+	if m.Updater == nil {
+		return false, nil, fmt.Errorf("更新功能未启用")
+	}
+	return m.Updater.HasUpdate(ctx)
+}
+
+// ApplyUpdate 安装指定版本。
+func (m *Manager) ApplyUpdate(ctx context.Context, tag string) (string, error) {
+	if m.Updater == nil {
+		return "", fmt.Errorf("更新功能未启用")
+	}
+	return m.Updater.Apply(ctx, tag)
+}
+
+// RollbackVersions 列出可回退版本。
+func (m *Manager) RollbackVersions() []string {
+	if m.Updater == nil {
+		return nil
+	}
+	return m.Updater.Versions()
+}
+
+// Rollback 回退到指定版本。
+func (m *Manager) Rollback(ctx context.Context, tag string) (string, error) {
+	if m.Updater == nil {
+		return "", fmt.Errorf("更新功能未启用")
+	}
+	return m.Updater.Rollback(ctx, tag)
 }
 
 // ---------- 内部 ----------

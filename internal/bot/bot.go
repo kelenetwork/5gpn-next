@@ -5,12 +5,14 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/kelenetwork/5gpn-next/internal/manage"
+	"github.com/kelenetwork/5gpn-next/internal/stats"
 )
 
 // Bot 是 Telegram 管理机器人。
@@ -246,6 +249,22 @@ func (b *Bot) dispatch(ctx context.Context, chatID int64, cmd string) {
 		b.showRules(ctx, chatID)
 	case cmd == "client":
 		b.showClient(ctx, chatID)
+	case cmd == "traffic":
+		b.showTraffic(ctx, chatID)
+	case cmd == "update":
+		b.showUpdate(ctx, chatID)
+	case cmd == "ios_profile":
+		b.sendProfile(ctx, chatID)
+	case cmd == "android_guide":
+		b.showAndroid(ctx, chatID)
+	case cmd == "update_check":
+		b.doUpdateCheck(ctx, chatID)
+	case strings.HasPrefix(cmd, "update_apply:"):
+		b.doUpdateApply(ctx, chatID, strings.TrimPrefix(cmd, "update_apply:"))
+	case cmd == "update_rollback":
+		b.showRollback(ctx, chatID)
+	case strings.HasPrefix(cmd, "rollback:"):
+		b.doRollback(ctx, chatID, strings.TrimPrefix(cmd, "rollback:"))
 	case cmd == "cancel":
 		b.mu.Lock()
 		delete(b.pending, chatID)
@@ -334,9 +353,10 @@ func (b *Bot) handleInput(ctx context.Context, chatID int64, action, text string
 
 func (b *Bot) showMenu(ctx context.Context, chatID int64) {
 	kb := inlineKeyboard(
-		[]btn{{"📊 状态", "status"}, {"📤 出口", "egress"}},
-		[]btn{{"📑 分流", "rules"}, {"🔍 诊断", "ask_probe"}},
-		[]btn{{"📱 客户端", "client"}},
+		[]btn{{"📊 状态", "status"}, {"📈 流量", "traffic"}},
+		[]btn{{"📤 出口", "egress"}, {"📑 分流", "rules"}},
+		[]btn{{"🔍 诊断", "ask_probe"}, {"📱 客户端", "client"}},
+		[]btn{{"🔄 更新", "update"}},
 	)
 	b.send(ctx, chatID,
 		"<b>5gpn-NEXT 管理面板</b>\n\n选择要执行的操作：", kb)
@@ -418,14 +438,266 @@ func (b *Bot) showRules(ctx context.Context, chatID int64) {
 func (b *Bot) showClient(ctx context.Context, chatID int64) {
 	var sb strings.Builder
 	sb.WriteString("<b>📱 客户端接入</b>\n\n")
-	sb.WriteString("iPhone / iPad（iOS 17+）：\n")
-	sb.WriteString("用 Safari 打开下方链接安装描述文件，\n然后前往 设置 → 通用 → VPN 与设备管理 完成安装。\n\n")
-	if b.Manager.ProfileURL != "" {
-		fmt.Fprintf(&sb, "<code>%s</code>\n\n", html.EscapeString(b.Manager.ProfileURL))
+	sb.WriteString("选择你的设备类型：\n\n")
+	sb.WriteString("<b>iPhone / iPad</b>（iOS 17 及以上）\n")
+	sb.WriteString("直接下发描述文件，点开即可安装。\n\n")
+	sb.WriteString("<b>Android</b>\n")
+	sb.WriteString("只需在系统「私人 DNS」中填一个域名，无需安装应用。")
+
+	b.send(ctx, chatID, sb.String(), inlineKeyboard(
+		[]btn{{"🍎 获取 iOS 描述文件", "ios_profile"}},
+		[]btn{{"🤖 Android 接入方法", "android_guide"}},
+		[]btn{{"⬅️ 返回", "menu"}},
+	))
+}
+
+// ---------- 流量 ----------
+
+func (b *Bot) showTraffic(ctx context.Context, chatID int64) {
+	sum, ok := b.Manager.TrafficSummary()
+	if !ok {
+		b.send(ctx, chatID, "流量统计未启用。", inlineKeyboard([]btn{{"⬅️ 返回", "menu"}}))
+		return
 	}
-	sb.WriteString("⚠️ 该链接必须在<b>内网卡蜂窝数据</b>下打开，Wi-Fi 无法访问。\n")
-	sb.WriteString("⚠️ 链接含随机串，等同密码，请勿外传。")
-	b.send(ctx, chatID, sb.String(), inlineKeyboard([]btn{{"⬅️ 返回", "menu"}}))
+
+	var sb strings.Builder
+	sb.WriteString("<b>📈 流量使用</b>\n\n")
+
+	line := func(name string, d stats.Day) {
+		fmt.Fprintf(&sb, "<b>%s</b>  %s\n", name, stats.HumanBytes(d.Total()))
+		fmt.Fprintf(&sb, "  ↑ %s   ↓ %s\n",
+			stats.HumanBytes(d.Up), stats.HumanBytes(d.Down))
+		fmt.Fprintf(&sb, "  连接 %d（直连 %d / 代理 %d）\n\n",
+			d.Conns, d.DirectConns, d.ProxyConns)
+	}
+	line("今日", sum.Today)
+	line("近 7 天", sum.Days7)
+	line("近 30 天", sum.Days30)
+
+	if len(sum.TopDomain) > 0 {
+		sb.WriteString("<b>流量最高的站点</b>\n")
+		for i, t := range sum.TopDomain {
+			if i >= 8 {
+				break
+			}
+			fmt.Fprintf(&sb, "%d. <code>%s</code>  %s\n",
+				i+1, html.EscapeString(t.Host), stats.HumanBytes(t.Bytes))
+		}
+		sb.WriteString("\n")
+	}
+	fmt.Fprintf(&sb, "<i>统计自 %s 起，仅保留聚合数据，不记录访问明细</i>",
+		html.EscapeString(sum.Since))
+
+	b.send(ctx, chatID, sb.String(), inlineKeyboard(
+		[]btn{{"🔄 刷新", "traffic"}},
+		[]btn{{"⬅️ 返回", "menu"}},
+	))
+}
+
+// ---------- 更新 ----------
+
+func (b *Bot) showUpdate(ctx context.Context, chatID int64) {
+	var sb strings.Builder
+	sb.WriteString("<b>🔄 版本管理</b>\n\n")
+	fmt.Fprintf(&sb, "当前版本：<code>%s</code>\n\n", html.EscapeString(b.Version))
+	sb.WriteString("检查更新会向 GitHub 查询最新发布版本。\n")
+	sb.WriteString("升级会校验 SHA256 后替换二进制并重启；\n")
+	sb.WriteString("若新版本启动失败，会自动回退到当前版本。")
+
+	rows := [][]btn{{{"🔍 检查更新", "update_check"}}}
+	if len(b.Manager.RollbackVersions()) > 0 {
+		rows = append(rows, []btn{{"⏮ 回退版本", "update_rollback"}})
+	}
+	rows = append(rows, []btn{{"⬅️ 返回", "menu"}})
+	b.send(ctx, chatID, sb.String(), inlineKeyboard(rows...))
+}
+
+func (b *Bot) doUpdateCheck(ctx context.Context, chatID int64) {
+	b.send(ctx, chatID, "正在查询最新版本…", "")
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	has, rel, err := b.Manager.CheckUpdate(cctx)
+	if err != nil {
+		b.send(ctx, chatID, "查询失败："+html.EscapeString(err.Error()),
+			inlineKeyboard([]btn{{"⬅️ 返回", "update"}}))
+		return
+	}
+	if !has {
+		b.send(ctx, chatID,
+			fmt.Sprintf("已是最新版本 <code>%s</code>", html.EscapeString(b.Version)),
+			inlineKeyboard([]btn{{"⬅️ 返回", "update"}}))
+		return
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "<b>发现新版本 %s</b>\n\n", html.EscapeString(rel.Tag))
+	fmt.Fprintf(&sb, "当前：<code>%s</code>\n", html.EscapeString(b.Version))
+	if !rel.Published.IsZero() {
+		fmt.Fprintf(&sb, "发布：%s\n", rel.Published.Format("2006-01-02 15:04"))
+	}
+	if notes := truncateText(rel.Notes, 1200); notes != "" {
+		fmt.Fprintf(&sb, "\n<b>更新内容</b>\n<pre>%s</pre>", html.EscapeString(notes))
+	}
+	b.send(ctx, chatID, sb.String(), inlineKeyboard(
+		[]btn{{"⬆️ 立即升级 " + rel.Tag, "update_apply:" + rel.Tag}},
+		[]btn{{"⬅️ 返回", "update"}},
+	))
+}
+
+func (b *Bot) doUpdateApply(ctx context.Context, chatID int64, tag string) {
+	b.send(ctx, chatID,
+		fmt.Sprintf("正在升级到 <code>%s</code>…\n升级期间服务会短暂重启。",
+			html.EscapeString(tag)), "")
+
+	// 升级会重启本进程，用独立 context 避免被取消
+	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	msg, err := b.Manager.ApplyUpdate(cctx, tag)
+	if err != nil {
+		b.send(ctx, chatID, "升级失败："+html.EscapeString(err.Error()),
+			inlineKeyboard([]btn{{"⬅️ 返回", "update"}}))
+		return
+	}
+	b.send(ctx, chatID, "✅ "+html.EscapeString(msg), "")
+}
+
+func (b *Bot) showRollback(ctx context.Context, chatID int64) {
+	vs := b.Manager.RollbackVersions()
+	if len(vs) == 0 {
+		b.send(ctx, chatID, "没有可回退的版本备份。",
+			inlineKeyboard([]btn{{"⬅️ 返回", "update"}}))
+		return
+	}
+	var rows [][]btn
+	for i, v := range vs {
+		if i >= 6 {
+			break
+		}
+		rows = append(rows, []btn{{"⏮ 回退到 " + v, "rollback:" + v}})
+	}
+	rows = append(rows, []btn{{"⬅️ 返回", "update"}})
+	b.send(ctx, chatID,
+		"<b>⏮ 回退版本</b>\n\n选择要回退到的版本。回退后会自动重启并验证服务状态。",
+		inlineKeyboard(rows...))
+}
+
+func (b *Bot) doRollback(ctx context.Context, chatID int64, tag string) {
+	b.send(ctx, chatID, "正在回退到 <code>"+html.EscapeString(tag)+"</code>…", "")
+	cctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	msg, err := b.Manager.Rollback(cctx, tag)
+	if err != nil {
+		b.send(ctx, chatID, "回退失败："+html.EscapeString(err.Error()),
+			inlineKeyboard([]btn{{"⬅️ 返回", "update"}}))
+		return
+	}
+	b.send(ctx, chatID, "✅ "+html.EscapeString(msg), "")
+}
+
+// ---------- 客户端文件下发 ----------
+
+// sendProfile 直接把描述文件作为文档发给管理员。
+//
+// 相比让用户去 Safari 打开一个长链接，直接发文件更省事：
+// iOS 上点开 Telegram 里的 .mobileconfig 即可跳转安装。
+func (b *Bot) sendProfile(ctx context.Context, chatID int64) {
+	if b.Manager.ProfileBytes == nil {
+		b.send(ctx, chatID, "描述文件生成器未就绪。", "")
+		return
+	}
+	data, err := b.Manager.ProfileBytes()
+	if err != nil {
+		b.send(ctx, chatID, "生成失败："+html.EscapeString(err.Error()), "")
+		return
+	}
+	caption := "<b>iOS 描述文件</b>\n\n" +
+		"1. 点击上方文件，选择「下载」\n" +
+		"2. 打开 设置 → 通用 → VPN 与设备管理\n" +
+		"3. 安装「5gpn-NEXT」描述文件\n\n" +
+		"⚠️ 安装前请先删除同名的旧描述文件。"
+	if err := b.sendDocument(ctx, chatID, "5gpn-next.mobileconfig", data, caption); err != nil {
+		b.send(ctx, chatID, "发送失败："+html.EscapeString(err.Error()), "")
+	}
+}
+
+func (b *Bot) showAndroid(ctx context.Context, chatID int64) {
+	var sb strings.Builder
+	sb.WriteString("<b>Android 接入</b>\n\n")
+
+	var g manage.AndroidGuide
+	if b.Manager.AndroidInfo != nil {
+		g = b.Manager.AndroidInfo()
+	}
+	if !g.Enabled {
+		sb.WriteString("当前未启用 Android 支持。\n\n")
+		sb.WriteString("启用方法：编辑服务器上的 <code>/etc/5gpn-next/config.json</code>，\n")
+		sb.WriteString("把 <code>android.enabled</code> 改为 <code>true</code> 并填写 <code>android.gateway_ip</code>，\n")
+		sb.WriteString("然后执行 <code>systemctl restart 5gpn-next</code>。")
+		b.send(ctx, chatID, sb.String(), inlineKeyboard([]btn{{"⬅️ 返回", "client"}}))
+		return
+	}
+
+	sb.WriteString("在手机上操作：\n\n")
+	sb.WriteString("设置 → 网络和互联网 → <b>私人 DNS</b>\n")
+	sb.WriteString("选择「指定的私人 DNS 服务提供商主机名」，填入：\n\n")
+	fmt.Fprintf(&sb, "<code>%s</code>\n\n", html.EscapeString(g.DoTHost))
+	sb.WriteString("保存后即可生效，无需安装任何应用。\n\n")
+	if g.Note != "" {
+		fmt.Fprintf(&sb, "<i>%s</i>", html.EscapeString(g.Note))
+	}
+	b.send(ctx, chatID, sb.String(), inlineKeyboard([]btn{{"⬅️ 返回", "client"}}))
+}
+
+// sendDocument 以 multipart 上传文件。
+func (b *Bot) sendDocument(ctx context.Context, chatID int64, filename string, data []byte, caption string) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	_ = mw.WriteField("caption", caption)
+	_ = mw.WriteField("parse_mode", "HTML")
+	fw, err := mw.CreateFormFile("document", filename)
+	if err != nil {
+		return err
+	}
+	if _, err := fw.Write(data); err != nil {
+		return err
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", b.Token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var r struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(body, &r)
+	if !r.OK {
+		return fmt.Errorf("telegram: %s", r.Description)
+	}
+	return nil
+}
+
+func truncateText(s string, n int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "\n…（内容过长已截断）"
 }
 
 // ---------- 键盘 ----------

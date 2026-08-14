@@ -60,6 +60,10 @@ type Server struct {
 	ProfilePath  string
 	ProfileBytes []byte
 
+	// OnConn 在每条连接结束时上报流量与结果，供统计使用（可为空）。
+	// host 为域名或裸 IP，action 取 direct / proxy / block。
+	OnConn func(host, action string, up, down int64, failed bool)
+
 	Stats Stats
 
 	seq atomic.Uint64
@@ -158,16 +162,20 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	pol := s.Policy()
 	reg := s.Egress()
 	dec := pol.Match(t)
+	actionName := "proxy"
 
 	switch dec.Action {
 	case policy.ActionBlock:
 		s.Stats.Blocked.Add(1)
 		tr.Step(trace.StagePolicy, trace.StatusOK, "%s → 拦截", dec.Rule)
+		s.report(t.Host, "block", 0, 0, false)
 		http.Error(w, "blocked by policy", http.StatusForbidden)
 		return
 	case policy.ActionDirect:
+		actionName = "direct"
 		tr.Step(trace.StagePolicy, trace.StatusOK, "%s → 直连", dec.Rule)
 	default:
+		actionName = "proxy"
 		tr.Step(trace.StagePolicy, trace.StatusOK, "%s → 代理:%s", dec.Rule, orDefault(dec.Egress, "默认"))
 	}
 
@@ -197,12 +205,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, egress.ErrNoIPv6) {
 			s.Stats.V6FastFail.Add(1)
 			tr.Fail(trace.StageConnect, err, "IPv6 目标快速失败，促使客户端回落 IPv4")
+			s.report(t.Host, actionName, 0, 0, true)
 			// 502 让 Happy Eyeballs 立刻改试 IPv4
 			http.Error(w, "no ipv6 egress", http.StatusBadGateway)
 			return
 		}
 		s.Stats.DialFail.Add(1)
 		tr.Fail(trace.StageConnect, err, "拨号 %s 失败", target)
+		s.report(t.Host, actionName, 0, 0, true)
 		http.Error(w, "upstream dial failed", http.StatusBadGateway)
 		return
 	}
@@ -211,14 +221,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 建立隧道 ----
 	if r.ProtoMajor == 1 {
-		s.tunnelH1(w, up, tr)
+		s.tunnelH1(w, up, tr, t.Host, actionName)
 		return
 	}
-	s.tunnelH2(w, r, up, tr)
+	s.tunnelH2(w, r, up, tr, t.Host, actionName)
 }
 
 // tunnelH2 处理 HTTP/2 CONNECT，这是 iOS Relay 的实际路径。
-func (s *Server) tunnelH2(w http.ResponseWriter, r *http.Request, up net.Conn, tr *trace.Trace) {
+func (s *Server) tunnelH2(w http.ResponseWriter, r *http.Request, up net.Conn, tr *trace.Trace, host, action string) {
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
@@ -258,13 +268,14 @@ func (s *Server) tunnelH2(w http.ResponseWriter, r *http.Request, up net.Conn, t
 	<-done
 
 	tr.Step(trace.StageApp, trace.StatusOK, "隧道关闭 up=%dB down=%dB", upN, downN)
+	s.report(host, action, upN, downN, false)
 }
 
 // tunnelH1 处理 HTTP/1.1 CONNECT。
 //
 // Go 的 h1 服务端必须 Hijack 才能做双向隧道，
 // 用 ResponseWriter 流式写会得到零字节隧道（P0 踩过）。
-func (s *Server) tunnelH1(w http.ResponseWriter, up net.Conn, tr *trace.Trace) {
+func (s *Server) tunnelH1(w http.ResponseWriter, up net.Conn, tr *trace.Trace, host, action string) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		tr.Fail(trace.StageApp, errors.New("hijack unsupported"), "h1 隧道无法建立")
@@ -292,6 +303,15 @@ func (s *Server) tunnelH1(w http.ResponseWriter, up net.Conn, tr *trace.Trace) {
 	<-done
 
 	tr.Step(trace.StageApp, trace.StatusOK, "隧道关闭 up=%dB down=%dB", upN, downN)
+	s.report(host, action, upN, downN, false)
+}
+
+// report 上报一次连接结果；未设置回调时静默跳过。
+func (s *Server) report(host, action string, up, down int64, failed bool) {
+	if s.OnConn == nil {
+		return
+	}
+	s.OnConn(host, action, up, down, failed)
 }
 
 func atomicAdd(dst *int64, n int64) { *dst += n }

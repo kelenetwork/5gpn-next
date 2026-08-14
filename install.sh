@@ -100,6 +100,14 @@ dim "Telegram Bot：在聊天窗口查看状态、增删出口、改分流、跑
 dim "先找 @BotFather 建 Bot 拿 Token，再找 @userinfobot 查你的数字 ID。"
 BOT_TK=$(FGPN_BOT_TOKEN="${FGPN_BOT_TOKEN:-}" ask FGPN_BOT_TOKEN "Bot Token（可留空跳过）")
 BOT_IDS=""
+if [ "$ANDROID_ON" = "true" ]; then
+  ANDROID_HINT="
+    Android：设置 → 网络和互联网 → 私人 DNS，填入 ${DOMAIN}"
+else
+  ANDROID_HINT="
+    Android：未启用。如需支持，把 config.json 的 android.enabled 改为 true"
+fi
+
 if [ -n "$BOT_TK" ]; then
   BOT_IDS=$(FGPN_BOT_ADMINS="${FGPN_BOT_ADMINS:-}" ask FGPN_BOT_ADMINS "你的 Telegram 数字 ID（多个用英文逗号分隔）")
   if [ -z "$BOT_IDS" ]; then
@@ -107,6 +115,15 @@ if [ -n "$BOT_TK" ]; then
     BOT_TK=""
   fi
 fi
+
+echo
+dim "设备类型：iOS 走系统 Relay（推荐），Android 走系统「私人 DNS」。"
+dim "启用 Android 会额外监听 853/80/443，需要云安全组放行这三个端口。"
+WANT_ANDROID=$(FGPN_ANDROID="${FGPN_ANDROID:-}" ask FGPN_ANDROID "是否启用 Android 支持？(y/N)" "N")
+case "$WANT_ANDROID" in
+  y|Y|yes|YES) ANDROID_ON=true ;;
+  *) ANDROID_ON=false ;;
+esac
 
 # 域名解析校验
 RESOLVED=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
@@ -262,6 +279,23 @@ else
   warn "未配置落地节点，外网流量将由本机直出"
 fi
 
+# Android 需要一个"客户端可路由到"的网关地址写入 DNS 应答。
+# 优先取落在客户端网段内的本机地址；没有则回退公网 IP。
+GW_IP=""
+if [ "$ANDROID_ON" = "true" ]; then
+  CPFX=${CLIENT_CIDR%%/*}
+  CPFX=${CPFX%.*.*}
+  GW_IP=$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 \
+          | grep "^${CPFX}\." | head -1 || true)
+  if [ -z "$GW_IP" ]; then
+    GW_IP="$PUBIP"
+    warn "未发现属于 ${CLIENT_CIDR} 的本机地址，Android 网关地址回退为 ${GW_IP}"
+    warn "若手机无法访问该地址，请手工修改 config.json 的 android.gateway_ip"
+  else
+    ok "Android 网关地址：${GW_IP}"
+  fi
+fi
+
 # ---------------------------------------------------------------- 5. 写配置
 step "生成配置"
 
@@ -322,6 +356,19 @@ cat > "$CFGDIR/config.json" <<EOF
     "enabled": true,
     "token": "${PANELTOK}"
   },
+  "android": {
+    "enabled": ${ANDROID_ON},
+    "dot_listen": ":853",
+    "gateway_ip": "${GW_IP}",
+    "http_listen": ":80",
+    "tls_listen": ":443",
+    "upstream": ["223.5.5.5:53", "119.29.29.29:53"]
+  },
+  "update": {
+    "check_enabled": true,
+    "interval_hours": 12,
+    "auto_apply": false
+  },
   "client_cidr": "${CLIENT_CIDR}",
   "log_path": "${LOGDIR}/trace.jsonl"
 }
@@ -333,6 +380,20 @@ ok "配置已写入 $CFGDIR/config.json"
 # ---------------------------------------------------------------- 6. 防火墙
 step "配置防火墙"
 
+ANDROID_NFT=""
+if [ "$ANDROID_ON" = "true" ]; then
+  # QUIC 无明文 SNI，无法嗅探接管；reject 让客户端尽快回落 TCP，
+  # 直接 drop 会让应用静默等待超时。
+  ANDROID_NFT=$(cat <<NFTEOF
+    ip saddr ${CLIENT_CIDR} tcp dport { 53, 80, 443, 853 } accept comment "5gpn-android"
+    ip saddr ${CLIENT_CIDR} udp dport 53 accept comment "5gpn-android"
+    ip saddr ${CLIENT_CIDR} udp dport 443 reject with icmp port-unreachable comment "5gpn-android-quic"
+NFTEOF
+)
+  ANDROID_NFT="${ANDROID_NFT}
+"
+fi
+
 # 使用独立表，不触碰其它表（Docker / fail2ban / 既有规则均不受影响）
 # 表名必须以字母开头：nftables 标识符不允许数字开头，"5gpn" 会解析失败
 nft list table inet fgpn >/dev/null 2>&1 && nft delete table inet fgpn 2>/dev/null || true
@@ -341,10 +402,13 @@ table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
-  }
+${ANDROID_NFT}  }
 }
 EOF
 ok "已放行 ${LISTEN_PORT}/tcp（仅来源 ${CLIENT_CIDR}）"
+if [ "$ANDROID_ON" = "true" ]; then
+  ok "已放行 853/80/443（Android 接入，仅来源 ${CLIENT_CIDR}）"
+fi
 
 cat > "$CFGDIR/nft-restore.sh" <<EOF
 #!/bin/bash
@@ -356,7 +420,7 @@ table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
-  }
+${ANDROID_NFT}  }
 }
 RULES
 EOF
@@ -447,6 +511,8 @@ cat <<EOF
 $(printf '%s' "$C_OK")━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$(printf '%s' "$C_OFF")
 
   安装完成
+
+  接入方式${ANDROID_HINT}
 
   iPhone / iPad（iOS 17+）
     用 Safari 打开以下链接安装描述文件（须走内网卡蜂窝数据）：

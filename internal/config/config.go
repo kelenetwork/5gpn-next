@@ -7,6 +7,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -37,11 +38,45 @@ type Config struct {
 	// 内网 Web 面板
 	Panel PanelConfig `json:"panel"`
 
-	// 客户端来源网段（用于面板访问控制与提示）
+	// 客户端来源网段（用于面板访问控制与 DNS 改写判定）
 	ClientCIDR string `json:"client_cidr"`
+
+	// Android 接入路径（DoT + SNI 嗅探）
+	Android AndroidConfig `json:"android"`
+
+	// 自动更新检查
+	Update UpdateConfig `json:"update"`
 
 	// 日志
 	LogPath string `json:"log_path"`
+}
+
+// AndroidConfig 是 Android 接入配置。
+//
+// Android 只提供「私密 DNS」一个入口，拿不到应用层目的地，
+// 因此必须靠 DNS 改写 + SNI/Host 嗅探还原目标。
+type AndroidConfig struct {
+	// Enabled 为 false 时完全不监听 DoT 与嗅探端口
+	Enabled bool `json:"enabled"`
+	// DoTListen 通常为 ":853"
+	DoTListen string `json:"dot_listen"`
+	// GatewayIP 是改写后返回给客户端的地址，必须是客户端可路由到的网关地址
+	GatewayIP string `json:"gateway_ip"`
+	// HTTPListen / TLSListen 是嗅探接管端口
+	HTTPListen string `json:"http_listen"`
+	TLSListen  string `json:"tls_listen"`
+	// Upstream 是 DNS 上游
+	Upstream []string `json:"upstream"`
+}
+
+// UpdateConfig 是更新检查配置。
+type UpdateConfig struct {
+	// CheckEnabled 开启后周期检查新版本并通过 Bot 推送
+	CheckEnabled bool `json:"check_enabled"`
+	// IntervalHours 检查间隔，0 表示使用默认 12 小时
+	IntervalHours int `json:"interval_hours"`
+	// AutoApply 为 true 时自动安装（默认关闭，仅推送通知）
+	AutoApply bool `json:"auto_apply"`
 }
 
 // BotConfig 是 Telegram 管理机器人配置。
@@ -113,7 +148,15 @@ func Default() *Config {
 		Final:      "proxy",
 		ClientCIDR: "172.22.0.0/16",
 		Panel:      PanelConfig{Enabled: true},
-		LogPath:    "/var/log/5gpn-next/trace.jsonl",
+		Android: AndroidConfig{
+			Enabled:    false,
+			DoTListen:  ":853",
+			HTTPListen: ":80",
+			TLSListen:  ":443",
+			Upstream:   []string{"223.5.5.5:53", "119.29.29.29:53"},
+		},
+		Update:  UpdateConfig{CheckEnabled: true, IntervalHours: 12},
+		LogPath: "/var/log/5gpn-next/trace.jsonl",
 		RuleSets: []RuleSetConfig{
 			{Name: "cn-domain", Kind: "domain", IntervalHours: 24,
 				URL: "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt"},
@@ -184,6 +227,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Panel.Enabled && c.Panel.Token == "" {
 		return fmt.Errorf("面板已启用但 panel.token 为空")
+	}
+	if c.Android.Enabled {
+		if c.Android.GatewayIP == "" {
+			return fmt.Errorf("已启用 Android 支持但 android.gateway_ip 为空")
+		}
+		if net.ParseIP(c.Android.GatewayIP) == nil {
+			return fmt.Errorf("android.gateway_ip %q 不是合法 IP", c.Android.GatewayIP)
+		}
 	}
 	if strings.HasPrefix(c.Final, "proxy:") {
 		name := strings.TrimPrefix(c.Final, "proxy:")
