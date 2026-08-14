@@ -513,7 +513,34 @@ func (m *Manager) Probe(ctx context.Context, target string) *trace.Trace {
 	m.mu.RLock()
 	p := &probe.Prober{Policy: m.Policy, Egress: m.Egress}
 	m.mu.RUnlock()
-	return p.Run(ctx, target)
+	return p.Run(ctx, NormalizeTarget(target))
+}
+
+// NormalizeTarget 把用户输入清洗成 host[:port]。
+//
+// 用户经常直接粘完整 URL（https://ipinfo.io/ip）；
+// 逐层剥掉 scheme、userinfo、路径、查询串，只留主机与端口。
+func NormalizeTarget(s string) string {
+	s = strings.TrimSpace(s)
+	// scheme://
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	// 路径 / 查询 / 锚点（IPv6 字面量含 ]，先处理右括号后的部分）
+	cutFrom := 0
+	if strings.HasPrefix(s, "[") {
+		if j := strings.Index(s, "]"); j >= 0 {
+			cutFrom = j
+		}
+	}
+	if i := strings.IndexAny(s[cutFrom:], "/?#"); i >= 0 {
+		s = s[:cutFrom+i]
+	}
+	// user:pass@host
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }
 
 // ---------- 流量 ----------
