@@ -116,7 +116,7 @@ function renderEgress(list) {
 
 async function loadStatus() {
   try {
-    renderStatus(await api('/panel/api/status'));
+    renderStatus(await api('/api/status'));
   } catch (err) {
     toast(err.message, true);
   }
@@ -126,7 +126,7 @@ async function loadStatus() {
 
 async function egressAction(action, extra) {
   try {
-    const data = await api('/panel/api/egress', {
+    const data = await api('/api/egress', {
       method: 'POST',
       body: JSON.stringify(Object.assign({ action }, extra)),
     });
@@ -160,7 +160,7 @@ function renderRules(rules) {
     const rm = el('button', 'btn btn-sm btn-danger', '删除');
     rm.onclick = async () => {
       try {
-        const data = await api('/panel/api/rules?index=' + i, { method: 'DELETE' });
+        const data = await api('/api/rules?index=' + i, { method: 'DELETE' });
         renderRules(data.rules || []);
         toast('规则已删除');
       } catch (err) {
@@ -175,7 +175,7 @@ function renderRules(rules) {
 
 async function loadRules() {
   try {
-    const data = await api('/panel/api/rules');
+    const data = await api('/api/rules');
     renderRules(data.rules || []);
   } catch (err) {
     toast(err.message, true);
@@ -208,7 +208,7 @@ async function runProbe() {
   out.textContent = '正在诊断 ' + target + ' …';
 
   try {
-    const data = await api('/panel/api/probe?target=' + encodeURIComponent(target));
+    const data = await api('/api/probe?target=' + encodeURIComponent(target));
     out.textContent = '';
     (data.steps || []).forEach((s, i) => {
       const [mark, cls] = STATUS_MARK[s.status] || ['?', ''];
@@ -252,7 +252,7 @@ $('rule-add').onclick = async () => {
   const rule = $('rule-input').value.trim();
   if (!rule) { toast('请输入规则', true); return; }
   try {
-    const data = await api('/panel/api/rules', {
+    const data = await api('/api/rules', {
       method: 'POST',
       body: JSON.stringify({ rule }),
     });

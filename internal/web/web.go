@@ -1,12 +1,12 @@
 // Package web 提供内网 Web 管理面板。
 //
-// 安全边界：只在内网卡来源可达（由 nftables 限制），并要求令牌登录。
-// 公网无法连接，令牌仅存于服务端配置与浏览器 Cookie。
+// 安全边界：面板只对内网卡来源开放 —— 应用层校验来源网段，
+// 外层再叠加 nftables 限制。公网无法连接，因此不设登录，
+// 手机连着内网卡打开域名即达。
 package web
 
 import (
 	"context"
-	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -27,7 +27,6 @@ var assets embed.FS
 // Panel 是 Web 面板。
 type Panel struct {
 	Manager *manage.Manager
-	Token   string
 	Version string
 
 	// AllowFrom 限定可访问的来源网段；为空时不做应用层限制
@@ -38,8 +37,8 @@ type Panel struct {
 }
 
 // New 构造面板。
-func New(m *manage.Manager, token, version string, allowCIDRs []string) (*Panel, error) {
-	p := &Panel{Manager: m, Token: token, Version: version}
+func New(m *manage.Manager, version string, allowCIDRs []string) (*Panel, error) {
+	p := &Panel{Manager: m, Version: version}
 	for _, c := range allowCIDRs {
 		c = strings.TrimSpace(c)
 		if c == "" {
@@ -63,24 +62,29 @@ func New(m *manage.Manager, token, version string, allowCIDRs []string) (*Panel,
 	return p, nil
 }
 
-// Handler 返回挂载在 /panel 前缀下的处理器。
+// Handler 返回挂载在根路径的处理器。
 func (p *Panel) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/panel", p.guard(p.handleIndex))
-	mux.HandleFunc("/panel/", p.guard(p.handleIndex))
-	mux.HandleFunc("/panel/login", p.handleLogin)
-	mux.HandleFunc("/panel/logout", p.handleLogout)
-	mux.HandleFunc("/panel/style.css", p.serveAsset("assets/style.css", "text/css; charset=utf-8"))
-	mux.HandleFunc("/panel/app.js", p.serveAsset("assets/app.js", "application/javascript; charset=utf-8"))
+	mux.HandleFunc("/", p.guard(p.handleIndex))
+	mux.HandleFunc("/style.css", p.serveAsset("assets/style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/app.js", p.serveAsset("assets/app.js", "application/javascript; charset=utf-8"))
+
+	// 兼容旧地址：/panel 一律跳回根
+	mux.HandleFunc("/panel", p.redirectRoot)
+	mux.HandleFunc("/panel/", p.redirectRoot)
 
 	// API
-	mux.HandleFunc("/panel/api/status", p.apiGuard(p.apiStatus))
-	mux.HandleFunc("/panel/api/rules", p.apiGuard(p.apiRules))
-	mux.HandleFunc("/panel/api/egress", p.apiGuard(p.apiEgress))
-	mux.HandleFunc("/panel/api/probe", p.apiGuard(p.apiProbe))
+	mux.HandleFunc("/api/status", p.apiGuard(p.apiStatus))
+	mux.HandleFunc("/api/rules", p.apiGuard(p.apiRules))
+	mux.HandleFunc("/api/egress", p.apiGuard(p.apiEgress))
+	mux.HandleFunc("/api/probe", p.apiGuard(p.apiProbe))
 
 	return mux
+}
+
+func (p *Panel) redirectRoot(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/", http.StatusMovedPermanently)
 }
 
 // ---------- 访问控制 ----------
@@ -110,26 +114,11 @@ func (p *Panel) sourceAllowed(r *http.Request) bool {
 	return false
 }
 
-func (p *Panel) authed(r *http.Request) bool {
-	if p.Token == "" {
-		return true
-	}
-	c, err := r.Cookie("fgpn_token")
-	if err != nil {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(p.Token)) == 1
-}
-
-// guard 包装页面处理器：先查来源，再查登录。
+// guard 包装页面处理器：校验来源网段。
 func (p *Panel) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !p.sourceAllowed(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		if !p.authed(r) {
-			p.renderLogin(w, "")
 			return
 		}
 		next(w, r)
@@ -143,10 +132,6 @@ func (p *Panel) apiGuard(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "来源不允许"})
 			return
 		}
-		if !p.authed(r) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
-			return
-		}
 		next(w, r)
 	}
 }
@@ -154,68 +139,13 @@ func (p *Panel) apiGuard(next http.HandlerFunc) http.HandlerFunc {
 // ---------- 页面 ----------
 
 func (p *Panel) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = p.tmpl.Execute(w, map[string]any{"Version": p.Version})
-}
-
-func (p *Panel) renderLogin(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	esc := template.HTMLEscapeString(msg)
-	fmt.Fprintf(w, `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>5gpn-NEXT 登录</title><link rel="stylesheet" href="/panel/style.css"></head>
-<body class="login-body"><form class="login" method="POST" action="/panel/login">
-<h1>5gpn-NEXT</h1><p class="sub">管理面板</p>
-%s<label>访问令牌</label>
-<input type="password" name="token" autocomplete="current-password" autofocus required>
-<button type="submit">登录</button>
-<p class="hint">令牌见服务器 /etc/5gpn-next/config.json 的 panel.token</p>
-</form></body></html>`,
-		func() string {
-			if esc == "" {
-				return ""
-			}
-			return `<p class="err">` + esc + `</p>`
-		}())
-}
-
-func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !p.sourceAllowed(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/panel", http.StatusSeeOther)
-		return
-	}
-	_ = r.ParseForm()
-	if subtle.ConstantTimeCompare([]byte(r.FormValue("token")), []byte(p.Token)) != 1 {
-		// 轻微延时，降低暴力尝试速率
-		time.Sleep(500 * time.Millisecond)
-		p.renderLogin(w, "令牌不正确")
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "fgpn_token",
-		Value:    p.Token,
-		Path:     "/panel",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   7 * 24 * 3600,
-	})
-	http.Redirect(w, r, "/panel", http.StatusSeeOther)
-}
-
-func (p *Panel) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name: "fgpn_token", Value: "", Path: "/panel",
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
-	})
-	http.Redirect(w, r, "/panel", http.StatusSeeOther)
 }
 
 func (p *Panel) serveAsset(name, ctype string) http.HandlerFunc {

@@ -322,8 +322,8 @@ func (b *Bot) maybeGreet(ctx context.Context, chatID int64) {
 		return
 	}
 	b.send(ctx, chatID, fmt.Sprintf(
-		"<b>5gpn-NEXT 已就绪</b>\n\n"+
-			"版本 <code>%s</code>\n"+
+		"✅ <b>5gpn-NEXT 已就绪</b>\n\n"+
+			"版本  <code>%s</code>\n"+
 			"服务已在运行，随时可以开始配置。",
 		html.EscapeString(b.Version)), "")
 }
@@ -355,14 +355,14 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 
 	case cmd == "ask_egress_add":
 		b.ask(ctx, v, "egress_add",
-			"<b>添加出口</b>\n\n"+
+			"➕ <b>添加出口</b>\n\n"+
 				"请粘贴节点分享链接。\n\n"+
 				"支持：<code>ss</code> <code>vless</code> <code>vmess</code> "+
 				"<code>trojan</code> <code>hysteria2</code> <code>tuic</code> "+
 				"<code>socks5</code> <code>http</code>")
 	case cmd == "ask_rule_add":
 		b.ask(ctx, v, "rule_add",
-			"<b>添加分流规则</b>\n\n"+
+			"➕ <b>添加分流规则</b>\n\n"+
 				"格式：<code>类型,值,动作</code>\n\n"+
 				"示例：\n"+
 				"<code>DOMAIN-SUFFIX,openai.com,proxy:node</code>\n"+
@@ -371,7 +371,7 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 				"新规则会插入到最前面，优先匹配。")
 	case cmd == "ask_probe":
 		b.ask(ctx, v, "probe",
-			"<b>连通性诊断</b>\n\n"+
+			"🩺 <b>连通性诊断</b>\n\n"+
 				"请输入要检测的域名，例如 <code>youtube.com</code>\n\n"+
 				"将逐层检查入口、策略、出口、连接与应用层。")
 
@@ -435,8 +435,8 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 			b.render(ctx, v, errBox("添加失败", err), backTo("egress"))
 			return
 		}
-		b.render(ctx, v, "<b>已添加出口</b>\n\n"+html.EscapeString(msg),
-			inlineKeyboard([]btn{{"查看出口", "egress"}}, []btn{{"返回主菜单", "menu"}}))
+		b.render(ctx, v, "✅ <b>已添加出口</b>\n\n"+html.EscapeString(msg),
+			inlineKeyboard([]btn{{"🌐 查看出口", "egress"}}, []btn{{"« 返回主菜单", "menu"}}))
 
 	case "rule_add":
 		if err := b.Manager.AddRule(text); err != nil {
@@ -447,20 +447,20 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 
 	case "probe":
 		target := strings.TrimSpace(text)
-		b.render(ctx, v, "正在诊断 <code>"+html.EscapeString(target)+"</code> …", "")
+		b.render(ctx, v, "🩺 正在诊断 <code>"+html.EscapeString(target)+"</code> …", "")
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		tr := b.Manager.Probe(cctx, target)
 
-		verdict := "连通正常"
+		verdict := "✅ 连通正常"
 		if !tr.OK() {
-			verdict = "存在故障"
+			verdict = "❌ 存在故障"
 		}
-		body := fmt.Sprintf("<b>诊断结果 · %s</b>\n<code>%s</code>\n\n<pre>%s</pre>",
+		body := fmt.Sprintf("🩺 <b>诊断结果</b> · %s\n<code>%s</code>\n\n<pre>%s</pre>",
 			verdict, html.EscapeString(target), html.EscapeString(tr.Human()))
 		b.render(ctx, v, body, inlineKeyboard(
-			[]btn{{"再测一次", "ask_probe"}},
-			[]btn{{"返回主菜单", "menu"}},
+			[]btn{{"🔁 再测一次", "ask_probe"}},
+			[]btn{{"« 返回主菜单", "menu"}},
 		))
 	}
 }
@@ -479,21 +479,18 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<b>5gpn-NEXT</b>\n")
-	sb.WriteString("<i>网关管理控制台</i>\n\n")
-	sb.WriteString("<code>")
-	fmt.Fprintf(&sb, "版本   %s\n", pad(st.Version, 22))
-	fmt.Fprintf(&sb, "运行   %s\n", pad(st.Uptime, 22))
-	fmt.Fprintf(&sb, "出口   %s\n", pad(cur, 22))
-	fmt.Fprintf(&sb, "规则   %d 条", st.Rules)
-	sb.WriteString("</code>\n\n")
-	sb.WriteString("请选择要执行的操作")
+	sb.WriteString("⚡️ <b>5gpn-NEXT</b> · <i>网关管理控制台</i>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	fmt.Fprintf(&sb, "🟢 运行 <b>%s</b> · 版本 <code>%s</code>\n", st.Uptime, st.Version)
+	fmt.Fprintf(&sb, "🌐 当前出口 <b>%s</b>\n", html.EscapeString(cur))
+	fmt.Fprintf(&sb, "📋 分流规则 <b>%d</b> 条\n\n", st.Rules)
+	sb.WriteString("<i>请选择要执行的操作 ↓</i>")
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"运行状态", "status"}, {"流量统计", "traffic"}},
-		[]btn{{"出口管理", "egress"}, {"分流规则", "rules"}},
-		[]btn{{"连通诊断", "ask_probe"}, {"客户端接入", "client"}},
-		[]btn{{"内网面板", "panel"}, {"版本更新", "update"}},
+		[]btn{{"📊 运行状态", "status"}, {"📈 流量统计", "traffic"}},
+		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
+		[]btn{{"🩺 连通诊断", "ask_probe"}, {"📱 客户端接入", "client"}},
+		[]btn{{"🖥 内网面板", "panel"}, {"🚀 版本更新", "update"}},
 	))
 }
 
@@ -501,72 +498,78 @@ func (b *Bot) showStatus(ctx context.Context, v view) {
 	st := b.Manager.Status(b.Version)
 
 	var sb strings.Builder
-	sb.WriteString("<b>运行状态</b>\n\n")
-	sb.WriteString("<code>")
-	fmt.Fprintf(&sb, "版本     %s\n", st.Version)
-	fmt.Fprintf(&sb, "运行时长 %s\n", st.Uptime)
-	fmt.Fprintf(&sb, "监听     %s\n", st.Listen)
-	fmt.Fprintf(&sb, "内存     %.1f MB\n", st.MemoryMB)
-	fmt.Fprintf(&sb, "规则     %d 条", st.Rules)
+	sb.WriteString("📊 <b>运行状态</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	fmt.Fprintf(&sb, "🏷 版本　<code>%s</code>\n", st.Version)
+	fmt.Fprintf(&sb, "⏱ 运行　<b>%s</b>\n", st.Uptime)
+	fmt.Fprintf(&sb, "📡 监听　<code>%s</code>\n", html.EscapeString(st.Listen))
+	fmt.Fprintf(&sb, "💾 内存　<b>%.1f MB</b>\n", st.MemoryMB)
+	fmt.Fprintf(&sb, "📋 规则　<b>%d</b> 条\n", st.Rules)
 	if st.CertUntil != "" {
-		fmt.Fprintf(&sb, "\n证书     %s", st.CertUntil)
+		fmt.Fprintf(&sb, "🔐 证书　%s\n", html.EscapeString(st.CertUntil))
 	}
-	sb.WriteString("</code>\n")
 
 	if len(st.Counters) > 0 {
-		sb.WriteString("\n<b>连接计数</b>\n<code>")
+		sb.WriteString("\n<b>连接计数</b>\n<blockquote>")
+		first := true
 		for _, k := range []string{"connect", "blocked", "dial_fail", "auth_fail", "v6_fastfail"} {
 			if val, ok := st.Counters[k]; ok {
-				fmt.Fprintf(&sb, "\n%s %d", pad(counterName(k), 12), val)
+				if !first {
+					sb.WriteString("\n")
+				}
+				first = false
+				fmt.Fprintf(&sb, "%s　<b>%d</b>", counterName(k), val)
 			}
 		}
-		sb.WriteString("</code>")
+		sb.WriteString("</blockquote>")
 	}
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"刷新", "status"}},
-		[]btn{{"返回主菜单", "menu"}},
+		[]btn{{"🔄 刷新", "status"}},
+		[]btn{{"« 返回主菜单", "menu"}},
 	))
 }
 
 func (b *Bot) showTraffic(ctx context.Context, v view) {
 	sum, ok := b.Manager.TrafficSummary()
 	if !ok {
-		b.render(ctx, v, "<b>流量统计</b>\n\n统计功能未启用。", backTo("menu"))
+		b.render(ctx, v, "📈 <b>流量统计</b>\n\n统计功能未启用。", backTo("menu"))
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<b>流量统计</b>\n\n<code>")
-	row := func(name string, d stats.Day) {
-		fmt.Fprintf(&sb, "%s %s\n", pad(name, 8), stats.HumanBytes(d.Total()))
-		fmt.Fprintf(&sb, "         ↑%s  ↓%s\n",
-			stats.HumanBytes(d.Up), stats.HumanBytes(d.Down))
-		fmt.Fprintf(&sb, "         %d 连接（直连 %d / 代理 %d）\n\n",
+	sb.WriteString("📈 <b>流量统计</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	row := func(icon, name string, d stats.Day) {
+		fmt.Fprintf(&sb, "%s <b>%s</b>　<b>%s</b>\n", icon, name, stats.HumanBytes(d.Total()))
+		fmt.Fprintf(&sb, "<blockquote>↑ %s　↓ %s\n%d 连接 · 直连 %d / 代理 %d</blockquote>\n",
+			stats.HumanBytes(d.Up), stats.HumanBytes(d.Down),
 			d.Conns, d.DirectConns, d.ProxyConns)
 	}
-	row("今日", sum.Today)
-	row("近 7 天", sum.Days7)
-	row("近 30 天", sum.Days30)
-	sb.WriteString("</code>")
+	row("📅", "今日", sum.Today)
+	row("🗓", "近 7 天", sum.Days7)
+	row("📆", "近 30 天", sum.Days30)
 
 	if len(sum.TopDomain) > 0 {
-		sb.WriteString("\n<b>流量最高的站点</b>\n<code>")
+		sb.WriteString("\n🔝 <b>流量最高的站点</b>\n<blockquote expandable>")
 		for i, t := range sum.TopDomain {
 			if i >= 8 {
 				break
 			}
-			fmt.Fprintf(&sb, "\n%d. %s %s", i+1,
-				pad(truncateText(t.Host, 26), 28), stats.HumanBytes(t.Bytes))
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "%d. <code>%s</code> · %s", i+1,
+				html.EscapeString(truncateText(t.Host, 30)), stats.HumanBytes(t.Bytes))
 		}
-		sb.WriteString("</code>")
+		sb.WriteString("</blockquote>")
 	}
-	fmt.Fprintf(&sb, "\n\n<i>统计自 %s 起。仅保留聚合数据，不记录访问明细。</i>",
+	fmt.Fprintf(&sb, "\n<i>统计自 %s 起，仅保留聚合数据，不记录访问明细。</i>",
 		html.EscapeString(sum.Since))
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"刷新", "traffic"}},
-		[]btn{{"返回主菜单", "menu"}},
+		[]btn{{"🔄 刷新", "traffic"}},
+		[]btn{{"« 返回主菜单", "menu"}},
 	))
 }
 
@@ -574,7 +577,8 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 	st := b.Manager.Status(b.Version)
 
 	var sb strings.Builder
-	sb.WriteString("<b>出口管理</b>\n\n")
+	sb.WriteString("🌐 <b>出口管理</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	sb.WriteString("<i>当前生效的出口决定外网流量从哪里出去。</i>\n\n")
 
 	var rows [][]btn
@@ -598,8 +602,8 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 	}
 	sb.WriteString("\n<i>● 为当前使用中的出口</i>")
 
-	rows = append(rows, []btn{{"添加出口", "ask_egress_add"}})
-	rows = append(rows, []btn{{"返回主菜单", "menu"}})
+	rows = append(rows, []btn{{"➕ 添加出口", "ask_egress_add"}})
+	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
@@ -607,7 +611,8 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 	rules := b.Manager.Rules()
 
 	var sb strings.Builder
-	sb.WriteString("<b>分流规则</b>\n\n")
+	sb.WriteString("🧭 <b>分流规则</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	sb.WriteString("<i>按顺序匹配，命中即停止。</i>\n\n")
 
 	if len(rules) == 0 {
@@ -631,48 +636,48 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 		}
 		rows = append(rows, []btn{{fmt.Sprintf("删除第 %d 条", i+1), fmt.Sprintf("del_rule:%d", i)}})
 	}
-	rows = append(rows, []btn{{"添加规则", "ask_rule_add"}})
-	rows = append(rows, []btn{{"返回主菜单", "menu"}})
+	rows = append(rows, []btn{{"➕ 添加规则", "ask_rule_add"}})
+	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
 func (b *Bot) showClient(ctx context.Context, v view) {
 	var sb strings.Builder
-	sb.WriteString("<b>客户端接入</b>\n\n")
-	sb.WriteString("<b>iPhone / iPad</b>  <i>iOS 17 及以上</i>\n")
-	sb.WriteString("获取描述文件后点开即可安装，无需任何应用。\n\n")
-	sb.WriteString("<b>Android</b>\n")
-	sb.WriteString("在系统「私人 DNS」中填一个域名即可，同样无需安装应用。")
+	sb.WriteString("📱 <b>客户端接入</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString("🍎 <b>iPhone / iPad</b>　<i>iOS 17 及以上</i>\n")
+	sb.WriteString("<blockquote>获取描述文件后点开即可安装，无需任何应用。</blockquote>\n")
+	sb.WriteString("🤖 <b>Android</b>\n")
+	sb.WriteString("<blockquote>在系统「私人 DNS」中填一个域名即可，同样无需安装应用。</blockquote>")
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"获取 iOS 描述文件", "ios_profile"}},
-		[]btn{{"Android 接入方法", "android_guide"}},
-		[]btn{{"返回主菜单", "menu"}},
+		[]btn{{"🍎 获取 iOS 描述文件", "ios_profile"}},
+		[]btn{{"🤖 Android 接入方法", "android_guide"}},
+		[]btn{{"« 返回主菜单", "menu"}},
 	))
 }
 
 func (b *Bot) showPanel(ctx context.Context, v view) {
 	var sb strings.Builder
-	sb.WriteString("<b>内网 Web 面板</b>\n\n")
+	sb.WriteString("🖥 <b>内网 Web 面板</b>\n\n")
 
 	if b.PanelURL == "" {
 		sb.WriteString("面板未启用。\n\n")
 		sb.WriteString("如需开启：编辑 <code>/etc/5gpn-next/config.json</code>，\n")
-		sb.WriteString("把 <code>panel.enabled</code> 设为 <code>true</code> 并填写 <code>panel.token</code>，\n")
+		sb.WriteString("把 <code>panel.enabled</code> 设为 <code>true</code>，\n")
 		sb.WriteString("然后执行 <code>systemctl restart 5gpn-next</code>。")
 		b.render(ctx, v, sb.String(), backTo("menu"))
 		return
 	}
 
-	sb.WriteString("在浏览器中管理状态、出口、分流与诊断：\n\n")
+	sb.WriteString("在浏览器中管理出口、分流与诊断：\n\n")
 	fmt.Fprintf(&sb, "<code>%s</code>\n\n", html.EscapeString(b.PanelURL))
-	sb.WriteString("<i>登录令牌见服务器 /etc/5gpn-next/config.json 的 panel.token</i>\n\n")
-	sb.WriteString("面板仅允许内网卡来源访问，公网无法连接。\n")
-	sb.WriteString("手机连着内网卡时可直接打开。")
+	sb.WriteString("📱 手机连着内网卡时<b>直接打开即可</b>，无需登录。\n")
+	sb.WriteString("🔒 仅内网卡来源可访问，公网完全无法连接。")
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"打开面板", "url:" + b.PanelURL}},
-		[]btn{{"返回主菜单", "menu"}},
+		[]btn{{"🖥 打开面板", "url:" + b.PanelURL}},
+		[]btn{{"« 返回主菜单", "menu"}},
 	))
 }
 
@@ -683,7 +688,8 @@ func (b *Bot) showAndroid(ctx context.Context, v view) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<b>Android 接入</b>\n\n")
+	sb.WriteString("🤖 <b>Android 接入</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 
 	if !g.Enabled {
 		sb.WriteString("当前未启用 Android 支持。\n\n")
@@ -698,14 +704,14 @@ func (b *Bot) showAndroid(ctx context.Context, v view) {
 	sb.WriteString("<b>设置 → 网络和互联网 → 私人 DNS</b>\n\n")
 	sb.WriteString("选择「指定的私人 DNS 服务提供商主机名」，填入：\n\n")
 	fmt.Fprintf(&sb, "<code>%s</code>\n\n", html.EscapeString(g.DoTHost))
-	sb.WriteString("保存后立即生效，无需安装任何应用。\n\n")
+	sb.WriteString("✅ 保存后立即生效，无需安装任何应用。\n\n")
 	if g.Note != "" {
 		fmt.Fprintf(&sb, "<i>%s</i>", html.EscapeString(g.Note))
 	}
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"返回客户端", "client"}},
-		[]btn{{"返回主菜单", "menu"}},
+		[]btn{{"« 返回客户端", "client"}},
+		[]btn{{"« 返回主菜单", "menu"}},
 	))
 }
 
@@ -713,21 +719,22 @@ func (b *Bot) showAndroid(ctx context.Context, v view) {
 
 func (b *Bot) showUpdate(ctx context.Context, v view) {
 	var sb strings.Builder
-	sb.WriteString("<b>版本更新</b>\n\n")
-	fmt.Fprintf(&sb, "当前版本  <code>%s</code>\n\n", html.EscapeString(b.Version))
+	sb.WriteString("🚀 <b>版本更新</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	fmt.Fprintf(&sb, "🏷 当前版本　<code>%s</code>\n\n", html.EscapeString(b.Version))
 	sb.WriteString("<i>升级会校验文件哈希后替换程序并重启；\n")
 	sb.WriteString("若新版本启动失败，将自动回退到当前版本。</i>")
 
-	rows := [][]btn{{{"检查更新", "update_check"}}}
+	rows := [][]btn{{{"🔍 检查更新", "update_check"}}}
 	if len(b.Manager.RollbackVersions()) > 0 {
-		rows = append(rows, []btn{{"回退到旧版本", "update_rollback"}})
+		rows = append(rows, []btn{{"⏪ 回退到旧版本", "update_rollback"}})
 	}
-	rows = append(rows, []btn{{"返回主菜单", "menu"}})
+	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
 func (b *Bot) doUpdateCheck(ctx context.Context, v view) {
-	b.render(ctx, v, "正在查询最新版本 …", "")
+	b.render(ctx, v, "🔍 正在查询最新版本 …", "")
 
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -739,30 +746,31 @@ func (b *Bot) doUpdateCheck(ctx context.Context, v view) {
 	}
 	if !has {
 		b.render(ctx, v, fmt.Sprintf(
-			"<b>已是最新版本</b>\n\n当前 <code>%s</code>", html.EscapeString(b.Version)),
+			"✅ <b>已是最新版本</b>\n\n当前 <code>%s</code>", html.EscapeString(b.Version)),
 			backTo("update"))
 		return
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "<b>发现新版本 %s</b>\n\n", html.EscapeString(rel.Tag))
-	fmt.Fprintf(&sb, "当前  <code>%s</code>\n", html.EscapeString(b.Version))
+	fmt.Fprintf(&sb, "🆕 <b>发现新版本 %s</b>\n", html.EscapeString(rel.Tag))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	fmt.Fprintf(&sb, "🏷 当前　<code>%s</code>\n", html.EscapeString(b.Version))
 	if !rel.Published.IsZero() {
-		fmt.Fprintf(&sb, "发布  %s\n", rel.Published.Format("2006-01-02 15:04"))
+		fmt.Fprintf(&sb, "📅 发布　%s\n", rel.Published.Format("2006-01-02 15:04"))
 	}
 	if notes := truncateText(strings.TrimSpace(rel.Notes), 1000); notes != "" {
-		fmt.Fprintf(&sb, "\n<b>更新内容</b>\n<pre>%s</pre>", html.EscapeString(notes))
+		fmt.Fprintf(&sb, "\n📋 <b>更新内容</b>\n<blockquote expandable>%s</blockquote>", html.EscapeString(notes))
 	}
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"立即升级到 " + rel.Tag, "update_apply:" + rel.Tag}},
-		[]btn{{"返回", "update"}},
+		[]btn{{"🚀 立即升级到 " + rel.Tag, "update_apply:" + rel.Tag}},
+		[]btn{{"« 返回", "update"}},
 	))
 }
 
 func (b *Bot) doUpdateApply(ctx context.Context, v view, tag string) {
 	b.render(ctx, v, fmt.Sprintf(
-		"正在升级到 <code>%s</code> …\n\n<i>服务将短暂重启，请稍候。</i>",
+		"🚀 正在升级到 <code>%s</code> …\n\n<i>服务将短暂重启，请稍候。</i>",
 		html.EscapeString(tag)), "")
 
 	// 升级会重启本进程，用独立 context 避免被取消
@@ -774,13 +782,13 @@ func (b *Bot) doUpdateApply(ctx context.Context, v view, tag string) {
 		b.render(ctx, v, errBox("升级失败", err), backTo("update"))
 		return
 	}
-	b.render(ctx, v, "<b>升级完成</b>\n\n"+html.EscapeString(msg), backTo("menu"))
+	b.render(ctx, v, "✅ <b>升级完成</b>\n\n"+html.EscapeString(msg), backTo("menu"))
 }
 
 func (b *Bot) showRollback(ctx context.Context, v view) {
 	vs := b.Manager.RollbackVersions()
 	if len(vs) == 0 {
-		b.render(ctx, v, "<b>回退版本</b>\n\n没有可用的版本备份。", backTo("update"))
+		b.render(ctx, v, "⏪ <b>回退版本</b>\n\n没有可用的版本备份。", backTo("update"))
 		return
 	}
 	var rows [][]btn
@@ -788,16 +796,16 @@ func (b *Bot) showRollback(ctx context.Context, v view) {
 		if i >= 6 {
 			break
 		}
-		rows = append(rows, []btn{{"回退到 " + ver, "rollback:" + ver}})
+		rows = append(rows, []btn{{"⏪ 回退到 " + ver, "rollback:" + ver}})
 	}
-	rows = append(rows, []btn{{"返回", "update"}})
+	rows = append(rows, []btn{{"« 返回", "update"}})
 	b.render(ctx, v,
-		"<b>回退版本</b>\n\n<i>回退后会自动重启并验证服务状态。</i>",
+		"⏪ <b>回退版本</b>\n\n<i>回退后会自动重启并验证服务状态。</i>",
 		inlineKeyboard(rows...))
 }
 
 func (b *Bot) doRollback(ctx context.Context, v view, tag string) {
-	b.render(ctx, v, "正在回退到 <code>"+html.EscapeString(tag)+"</code> …", "")
+	b.render(ctx, v, "⏪ 正在回退到 <code>"+html.EscapeString(tag)+"</code> …", "")
 	cctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	msg, err := b.Manager.Rollback(cctx, tag)
@@ -805,7 +813,7 @@ func (b *Bot) doRollback(ctx context.Context, v view, tag string) {
 		b.render(ctx, v, errBox("回退失败", err), backTo("update"))
 		return
 	}
-	b.render(ctx, v, "<b>回退完成</b>\n\n"+html.EscapeString(msg), backTo("menu"))
+	b.render(ctx, v, "✅ <b>回退完成</b>\n\n"+html.EscapeString(msg), backTo("menu"))
 }
 
 // ---------- 描述文件 ----------

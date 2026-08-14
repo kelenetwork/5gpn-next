@@ -288,8 +288,7 @@ step "生成配置"
 
 TOKEN=$(head -c 20 /dev/urandom | od -An -tx1 | tr -d ' \n')
 DLPATH="/dl/$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')/5gpn-next.mobileconfig"
-# 面板登录令牌与 Bot 管理员 JSON 数组
-PANELTOK=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+# Bot 管理员 JSON 数组
 BOT_IDS_JSON=$(printf '%s' "$BOT_IDS" | tr -d ' ' | sed 's/,\{2,\}/,/g; s/^,//; s/,$//')
 
 if [ -s "$CFGDIR/config.json" ]; then
@@ -340,8 +339,7 @@ cat > "$CFGDIR/config.json" <<EOF
     "admins": [${BOT_IDS_JSON}]
   },
   "panel": {
-    "enabled": true,
-    "token": "${PANELTOK}"
+    "enabled": true
   },
   "android": {
     "enabled": ${ANDROID_ON},
@@ -512,9 +510,8 @@ $(printf '%s' "$C_OK")━━━━━━━━━━━━━━━━━━━�
     安装后：设置 → 通用 → VPN 与设备管理 → 安装描述文件
 
   内网 Web 面板
-    https://${DOMAIN}:${LISTEN_PORT}/panel
-    登录令牌：${PANELTOK}
-    仅内网卡来源可访问，公网无法连接。
+    https://${DOMAIN}:${LISTEN_PORT}/
+    手机连内网卡直接打开，无需登录；仅内网卡来源可访问，公网无法连接。
 
   Telegram Bot
     ${BOT_HINT}

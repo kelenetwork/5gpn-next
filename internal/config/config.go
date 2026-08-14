@@ -226,9 +226,7 @@ func (c *Config) Validate() error {
 	if c.Bot.Token != "" && len(c.Bot.Admins) == 0 {
 		return fmt.Errorf("已配置 bot.token 但 bot.admins 为空，Bot 将不响应任何人")
 	}
-	if c.Panel.Enabled && c.Panel.Token == "" {
-		return fmt.Errorf("面板已启用但 panel.token 为空")
-	}
+
 	if c.Android.Enabled {
 		if c.Android.GatewayIP == "" {
 			return fmt.Errorf("已启用 Android 支持但 android.gateway_ip 为空")
