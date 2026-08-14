@@ -8,9 +8,12 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -168,6 +171,12 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 		name = fmt.Sprintf("node%d", time.Now().Unix()%10000)
 	}
 
+	// mihomo 只在安装时填了节点才会被装上；缺失时给出明确指引，
+	// 而不是让 systemd 报一句看不懂的 exec 失败。
+	if _, err := os.Stat("/usr/local/bin/mihomo"); err != nil {
+		return "", fmt.Errorf("服务器未安装 mihomo 出口协议栈。\n请重跑安装脚本并在询问时粘贴节点链接，脚本会自动安装")
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -177,10 +186,17 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 		}
 	}
 
-	// 每个出口一个独立 mihomo 实例，端口顺延。
+	// 每个出口一个独立 mihomo 实例。端口取当前已用最大值 +1，
+	// 不能用 len(egress)：删除后再添加会与存活实例撞端口。
+	port := 7891
+	for _, e := range m.Cfg.Egress {
+		if p, ok := localPort(e.Addr); ok && p >= port {
+			port = p + 1
+		}
+	}
+
 	// 配置放 /var/lib：服务开启 ProtectSystem=full 后 /etc 只读，
 	// 运行期写 /etc/mihomo-5gpn 会直接 EROFS。
-	port := 7891 + len(m.Cfg.Egress)
 	dir := egressDir + "/" + name
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
@@ -196,17 +212,91 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 		return "", err
 	}
 	if err := systemctl("enable", "--now", "mihomo-5gpn@"+name+".service"); err != nil {
+		_ = os.RemoveAll(dir)
 		return "", fmt.Errorf("启动出口服务失败: %w", err)
+	}
+
+	// 端到端验证：经 mihomo 的 SOCKS5 真实建立一条出站连接。
+	// 验证不通过就回滚，绝不把坏出口留在列表里 ——
+	// 一旦切换到坏出口，手机侧全部国外流量当场失联。
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	if err := verifyEgress(addr, 12*time.Second); err != nil {
+		_ = systemctl("disable", "--now", "mihomo-5gpn@"+name+".service")
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("出口联通性验证失败，已回滚：%v\n\n"+
+			"节点可能不可用或凭据错误，可在服务器执行\n"+
+			"journalctl -u mihomo-5gpn@%s -n 30 查看细节", err, name)
 	}
 
 	m.Cfg.Egress = append(m.Cfg.Egress, config.EgressConfig{
 		Name: name, Type: "socks5",
-		Addr: fmt.Sprintf("127.0.0.1:%d", port),
+		Addr: addr,
 	})
 	if err := m.saveAndReloadLocked(); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("已添加出口 %s（%s）", name, n.Redacted()), nil
+	return fmt.Sprintf("已添加出口 %s（%s），联通性验证通过", name, n.Redacted()), nil
+}
+
+// localPort 提取 127.0.0.1:N 形式地址的端口。
+func localPort(addr string) (int, bool) {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, false
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, false
+	}
+	return p, true
+}
+
+// verifyEgress 端到端验证 SOCKS5 出口。
+//
+// 仅 SOCKS 握手成功不能证明链路可用：mihomo 会先应答本地 SOCKS，
+// 再懒连接上游节点。必须真实发出 HTTP 请求并收到状态行，
+// 才能证明 mihomo → 节点 → 目标 整条数据通路是通的。
+// mihomo 启动需要时间，在 total 期限内重试。
+func verifyEgress(addr string, total time.Duration) error {
+	targets := []struct{ host, path string }{
+		{"cp.cloudflare.com", "/generate_204"},
+		{"www.gstatic.com", "/generate_204"},
+	}
+	d := egress.NewSocks5("verify", addr, false)
+	deadline := time.Now().Add(total)
+	var lastErr error
+	for {
+		for _, t := range targets {
+			err := func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				c, err := d.DialContext(ctx, "tcp", t.host+":80")
+				if err != nil {
+					return err
+				}
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+				fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+					t.path, t.host)
+				buf := make([]byte, 16)
+				if _, err := io.ReadFull(c, buf); err != nil {
+					return fmt.Errorf("读取响应失败（节点可能不通）: %w", err)
+				}
+				if !strings.HasPrefix(string(buf), "HTTP/") {
+					return fmt.Errorf("响应异常: %q", string(buf))
+				}
+				return nil
+			}()
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(700 * time.Millisecond)
+	}
 }
 
 // RemoveEgress 删除出口。
@@ -242,19 +332,35 @@ func (m *Manager) RemoveEgress(name string) error {
 
 // SwitchEgress 切换默认出口。
 func (m *Manager) SwitchEgress(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	found := name == "DIRECT"
+	addr := ""
 	for _, e := range m.Cfg.Egress {
 		if e.Name == name {
 			found = true
+			if e.Type == "socks5" {
+				addr = e.Addr
+			}
 			break
 		}
 	}
+	m.mu.RUnlock()
+
 	if !found {
 		return fmt.Errorf("出口 %q 不存在", name)
 	}
+
+	// 切换前先验证：切到坏出口 = 手机侧全部国外流量当场失联，
+	// 必须在这里挡住，而不是让用户切完才发现没网。
+	if addr != "" {
+		if err := verifyEgress(addr, 8*time.Second); err != nil {
+			return fmt.Errorf("出口 %q 验证失败，未切换：%v\n\n"+
+				"请先用「连通诊断」排查该出口", name, err)
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if name == "DIRECT" {
 		m.Cfg.Final = "direct"
 	} else {
