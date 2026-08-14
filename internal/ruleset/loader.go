@@ -78,6 +78,16 @@ func (f *Fetcher) cachePath(name string) string {
 	return filepath.Join(f.CacheDir, safe+".list")
 }
 
+// Cached 返回已有缓存的路径；无缓存时 ok=false。
+// 用于启动加速：有缓存就先用，联网刷新放到后台做。
+func (f *Fetcher) Cached(name string) (string, bool) {
+	dst := f.cachePath(name)
+	if st, err := os.Stat(dst); err == nil && st.Size() > 0 {
+		return dst, true
+	}
+	return "", false
+}
+
 // Fetch 下载规则集到缓存；失败时若已有缓存则返回缓存路径与 nil。
 func (f *Fetcher) Fetch(ctx context.Context, name, url string) (string, error) {
 	dst := f.cachePath(name)

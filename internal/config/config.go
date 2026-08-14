@@ -135,16 +135,9 @@ func Default() *Config {
 		Egress: []EgressConfig{
 			{Name: "DIRECT", Type: "direct"},
 		},
-		Rules: []string{
-			// 私有地址永不出网关
-			"IP-CIDR,10.0.0.0/8,direct",
-			"IP-CIDR,172.16.0.0/12,direct",
-			"IP-CIDR,192.168.0.0/16,direct",
-			"IP-CIDR,127.0.0.0/8,direct",
-			// 国内域名与国内 IP 直连
-			"RULE-SET,cn-domain,direct",
-			"GEOIP,cn,direct",
-		},
+		// Rules 只存用户自定义规则；基础规则已内置（见 BuiltinPre/BuiltinPost），
+		// 不进配置文件，用户无法误删。
+		Rules:      nil,
 		Final:      "proxy",
 		ClientCIDR: "172.22.0.0/16",
 		Panel:      PanelConfig{Enabled: true},
@@ -167,6 +160,54 @@ func Default() *Config {
 	}
 }
 
+// BuiltinPre 是永远最先匹配的内置规则：私有地址绝不出网关。
+// 放在用户规则之前，任何自定义规则都无法把内网流量导出去。
+func BuiltinPre() []string {
+	return []string{
+		"IP-CIDR,10.0.0.0/8,direct",
+		"IP-CIDR,172.16.0.0/12,direct",
+		"IP-CIDR,192.168.0.0/16,direct",
+		"IP-CIDR,127.0.0.0/8,direct",
+		"IP-CIDR,169.254.0.0/16,direct",
+	}
+}
+
+// BuiltinPost 是用户规则之后的内置兜底：国内域名与国内 IP 直连。
+// 放在用户规则之后，用户仍可用自定义规则覆盖个别域名。
+func BuiltinPost() []string {
+	return []string{
+		"RULE-SET,cn-domain,direct",
+		"GEOIP,cn,direct",
+	}
+}
+
+// stripBuiltin 从用户规则中剔除与内置规则重复的条目。
+// 兼容旧版本：以前这些规则写在配置文件里，升级后自动迁移。
+func stripBuiltin(rules []string) []string {
+	builtin := map[string]bool{}
+	for _, r := range BuiltinPre() {
+		builtin[normalizeRule(r)] = true
+	}
+	for _, r := range BuiltinPost() {
+		builtin[normalizeRule(r)] = true
+	}
+	var out []string
+	for _, r := range rules {
+		if !builtin[normalizeRule(r)] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func normalizeRule(r string) string {
+	parts := strings.Split(r, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return strings.ToUpper(strings.Join(parts, ","))
+}
+
 // Load 从文件读取配置。
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -177,6 +218,7 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(b, c); err != nil {
 		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
+	c.Rules = stripBuiltin(c.Rules)
 	return c, c.Validate()
 }
 

@@ -11,7 +11,9 @@ package bot
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -26,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
 	"github.com/kelenetwork/5gpn-next/internal/stats"
 )
@@ -426,14 +429,16 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		}
 		b.showEgress(ctx, v)
 
-	case strings.HasPrefix(cmd, "del_rule:"):
-		if idx, err := strconv.Atoi(strings.TrimPrefix(cmd, "del_rule:")); err == nil {
-			if err := b.Manager.RemoveRule(idx); err != nil {
-				b.render(ctx, v, errBox("删除失败", err), backTo("rules"))
-				return
-			}
+	case cmd == "rule_del_menu":
+		b.showRuleDelMenu(ctx, v)
+	case strings.HasPrefix(cmd, "rule_del_ask:"):
+		if idx, err := strconv.Atoi(strings.TrimPrefix(cmd, "rule_del_ask:")); err == nil {
+			b.askRuleDelete(ctx, v, idx)
+			return
 		}
 		b.showRules(ctx, v)
+	case strings.HasPrefix(cmd, "rule_del_do:"):
+		b.doRuleDelete(ctx, v, strings.TrimPrefix(cmd, "rule_del_do:"))
 
 	default:
 		b.showMenu(ctx, v)
@@ -635,32 +640,136 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 	var sb strings.Builder
 	sb.WriteString("🧭 <b>分流规则</b>\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString("<i>按顺序匹配，命中即停止。</i>\n\n")
+	sb.WriteString("<i>匹配顺序：内置保护 → 自定义规则 → 内置兜底，命中即停止。</i>\n\n")
 
+	sb.WriteString("✏️ <b>自定义规则</b>\n")
 	if len(rules) == 0 {
-		sb.WriteString("<i>暂无规则</i>\n")
+		sb.WriteString("<blockquote>暂无。国内直连、国外走出口已由内置规则完成，\n通常只在个别域名需要特殊处理时才添加。</blockquote>\n")
 	} else {
-		sb.WriteString("<code>")
+		sb.WriteString("<blockquote>")
 		for i, r := range rules {
 			if i >= 20 {
 				fmt.Fprintf(&sb, "\n… 另有 %d 条未显示", len(rules)-20)
 				break
 			}
-			fmt.Fprintf(&sb, "\n%2d. %s", i+1, html.EscapeString(r))
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "%d. <code>%s</code>", i+1, html.EscapeString(r))
 		}
-		sb.WriteString("</code>")
+		sb.WriteString("</blockquote>\n")
 	}
 
-	var rows [][]btn
-	for i := range rules {
-		if i >= 6 {
-			break
-		}
-		rows = append(rows, []btn{{fmt.Sprintf("删除第 %d 条", i+1), fmt.Sprintf("del_rule:%d", i)}})
+	sb.WriteString("\n🔒 <b>内置规则</b>　<i>不可修改</i>\n")
+	sb.WriteString("<blockquote expandable>优先于自定义（私网保护）：\n")
+	for _, r := range config.BuiltinPre() {
+		fmt.Fprintf(&sb, "<code>%s</code>\n", html.EscapeString(r))
 	}
+	sb.WriteString("\n自定义之后兜底（国内直连）：\n")
+	for i, r := range config.BuiltinPost() {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "<code>%s</code>", html.EscapeString(r))
+	}
+	sb.WriteString("</blockquote>")
+
+	var rows [][]btn
 	rows = append(rows, []btn{{"➕ 添加规则", "ask_rule_add"}})
+	if len(rules) > 0 {
+		rows = append(rows, []btn{{"🗑 删除规则", "rule_del_menu"}})
+	}
 	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+// showRuleDelMenu 列出可删除的自定义规则，每条一个按钮，按钮上带规则内容。
+func (b *Bot) showRuleDelMenu(ctx context.Context, v view) {
+	rules := b.Manager.Rules()
+	if len(rules) == 0 {
+		b.showRules(ctx, v)
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🗑 <b>删除规则</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString("<i>点击要删除的规则，删除前会再确认一次。</i>\n\n<blockquote>")
+	for i, r := range rules {
+		if i >= 12 {
+			fmt.Fprintf(&sb, "\n… 另有 %d 条，请在内网面板中操作", len(rules)-12)
+			break
+		}
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "%d. <code>%s</code>", i+1, html.EscapeString(r))
+	}
+	sb.WriteString("</blockquote>")
+
+	var rows [][]btn
+	for i, r := range rules {
+		if i >= 12 {
+			break
+		}
+		rows = append(rows, []btn{{fmt.Sprintf("🗑 %d · %s", i+1, truncateText(ruleGist(r), 24)),
+			fmt.Sprintf("rule_del_ask:%d", i)}})
+	}
+	rows = append(rows, []btn{{"« 返回规则", "rules"}})
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+// askRuleDelete 删除前确认，展示完整规则内容。
+func (b *Bot) askRuleDelete(ctx context.Context, v view, idx int) {
+	rules := b.Manager.Rules()
+	if idx < 0 || idx >= len(rules) {
+		b.showRules(ctx, v)
+		return
+	}
+	body := fmt.Sprintf("⚠️ <b>确认删除这条规则？</b>\n\n<code>%s</code>\n\n<i>删除后立即生效。</i>",
+		html.EscapeString(rules[idx]))
+	b.render(ctx, v, body, inlineKeyboard(
+		[]btn{{"🗑 确认删除", fmt.Sprintf("rule_del_do:%d:%s", idx, ruleFingerprint(rules[idx]))}},
+		[]btn{{"« 取消", "rule_del_menu"}},
+	))
+}
+
+// doRuleDelete 校验指纹后删除：规则列表在确认期间可能已变化，
+// 指纹不匹配时拒绝，避免误删错位后的其它规则。
+func (b *Bot) doRuleDelete(ctx context.Context, v view, arg string) {
+	parts := strings.SplitN(arg, ":", 2)
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil {
+		b.showRules(ctx, v)
+		return
+	}
+	rules := b.Manager.Rules()
+	if idx < 0 || idx >= len(rules) ||
+		len(parts) < 2 || ruleFingerprint(rules[idx]) != parts[1] {
+		b.render(ctx, v, "⚠️ <b>规则列表已变化</b>\n\n为避免误删，本次操作已取消，请重新选择。",
+			backTo("rules"))
+		return
+	}
+	if err := b.Manager.RemoveRule(idx); err != nil {
+		b.render(ctx, v, errBox("删除失败", err), backTo("rules"))
+		return
+	}
+	b.showRules(ctx, v)
+}
+
+// ruleGist 取规则中最有辨识度的部分（值），供按钮标签使用。
+func ruleGist(r string) string {
+	parts := strings.Split(r, ",")
+	if len(parts) >= 2 {
+		return strings.TrimSpace(parts[1])
+	}
+	return r
+}
+
+// ruleFingerprint 生成规则内容短指纹，用于确认删除时校验列表未变化。
+func ruleFingerprint(r string) string {
+	sum := sha256.Sum256([]byte(r))
+	return hex.EncodeToString(sum[:4])
 }
 
 func (b *Bot) showClient(ctx context.Context, v view) {

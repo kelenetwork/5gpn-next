@@ -411,3 +411,15 @@ body {
   .form-inline .btn { width: 100%; }
   .row { flex-wrap: wrap; }
 }
+
+/* 内置规则（只读展示） */
+.row-builtin { opacity: 0.62; }
+.row-builtin .rule-text { font-style: normal; }
+.builtin-tag {
+  font-size: 11px;
+  color: var(--muted, #888);
+  white-space: nowrap;
+  padding: 2px 8px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 999px;
+}

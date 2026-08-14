@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
 )
 
@@ -174,7 +175,11 @@ func (p *Panel) apiStatus(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) apiRules(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"rules": p.Manager.Rules()})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"rules":        p.Manager.Rules(),
+			"builtin_pre":  config.BuiltinPre(),
+			"builtin_post": config.BuiltinPost(),
+		})
 
 	case http.MethodPost:
 		var body struct {

@@ -42,8 +42,10 @@ type Manager struct {
 	// ProfileURL 是描述文件下载地址，供前端展示
 	ProfileURL string
 
-	// Reload 由主程序注入：配置变更后重建策略与出口
-	Reload func() error
+	// Reload 由主程序注入：配置变更后重建策略与出口，
+	// 返回新的运行态由 Manager 自行装配。
+	// 注入的函数绝不能回调 Manager 的加锁方法（会死锁）。
+	Reload func() (*policy.Engine, *egress.Registry, error)
 
 	// Traffic 是流量统计存储（可为空）
 	Traffic *stats.Store
@@ -346,6 +348,22 @@ func (m *Manager) Rollback(ctx context.Context, tag string) (string, error) {
 	return m.Updater.Rollback(ctx, tag)
 }
 
+// ReloadRuntime 仅重建运行态（策略引擎/出口），不改配置文件。
+// 供规则集后台刷新等场景使用。
+func (m *Manager) ReloadRuntime() error {
+	if m.Reload == nil {
+		return nil
+	}
+	p, e, err := m.Reload()
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.Policy, m.Egress = p, e
+	m.mu.Unlock()
+	return nil
+}
+
 // ---------- 内部 ----------
 
 // saveAndReloadLocked 保存配置并热重载。调用方须持有写锁。
@@ -362,17 +380,22 @@ func (m *Manager) saveAndReloadLocked() error {
 	if m.Reload == nil {
 		return nil
 	}
-	if err := m.Reload(); err != nil {
+	p, e, err := m.Reload()
+	if err != nil {
 		// 回滚
 		if b, rerr := os.ReadFile(backup); rerr == nil {
 			_ = os.WriteFile(m.ConfigPath, b, 0o600)
 			if c, cerr := config.Load(m.ConfigPath); cerr == nil {
 				m.Cfg = c
 			}
-			_ = m.Reload()
+			if rp, re, rerr2 := m.Reload(); rerr2 == nil {
+				m.Policy, m.Egress = rp, re
+			}
 		}
 		return fmt.Errorf("应用配置失败，已回滚: %w", err)
 	}
+	// 调用方已持有写锁，直接赋值
+	m.Policy, m.Egress = p, e
 	_ = os.Remove(backup)
 	return nil
 }

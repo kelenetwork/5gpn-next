@@ -309,15 +309,7 @@ cat > "$CFGDIR/config.json" <<EOF
   "egress": [
     ${EGRESS_JSON}
   ],
-  "rules": [
-    "IP-CIDR,10.0.0.0/8,direct",
-    "IP-CIDR,172.16.0.0/12,direct",
-    "IP-CIDR,192.168.0.0/16,direct",
-    "IP-CIDR,127.0.0.0/8,direct",
-    "IP-CIDR,169.254.0.0/16,direct",
-    "RULE-SET,cn-domain,direct",
-    "GEOIP,cn,direct"
-  ],
+  "rules": [],
   "final": "${FINAL}",
   "rulesets": [
     {

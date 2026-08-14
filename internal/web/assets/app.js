@@ -139,15 +139,19 @@ async function egressAction(action, extra) {
 
 // ---------- 规则 ----------
 
-function renderRules(rules) {
+function renderRules(data) {
   const box = $('rules-list');
   box.textContent = '';
 
-  if (!rules.length) {
-    box.appendChild(el('p', 'empty', '暂无规则'));
-    return;
-  }
+  const rules = data.rules || [];
+  const pre = data.builtin_pre || [];
+  const post = data.builtin_post || [];
 
+  pre.forEach((r) => box.appendChild(builtinRow(r, '内置 · 优先')));
+
+  if (!rules.length) {
+    box.appendChild(el('p', 'empty', '暂无自定义规则 — 国内直连、国外走出口已由内置规则完成'));
+  }
   rules.forEach((r, i) => {
     const row = el('div', 'row');
     row.appendChild(el('span', 'rule-index', String(i + 1)));
@@ -159,9 +163,10 @@ function renderRules(rules) {
     const acts = el('div', 'row-actions');
     const rm = el('button', 'btn btn-sm btn-danger', '删除');
     rm.onclick = async () => {
+      if (!confirm('确认删除这条规则？\n\n' + r)) return;
       try {
-        const data = await api('/api/rules?index=' + i, { method: 'DELETE' });
-        renderRules(data.rules || []);
+        await api('/api/rules?index=' + i, { method: 'DELETE' });
+        await loadRules();
         toast('规则已删除');
       } catch (err) {
         toast(err.message, true);
@@ -171,12 +176,26 @@ function renderRules(rules) {
     row.appendChild(acts);
     box.appendChild(row);
   });
+
+  post.forEach((r) => box.appendChild(builtinRow(r, '内置 · 兜底')));
+}
+
+function builtinRow(r, label) {
+  const row = el('div', 'row row-builtin');
+  row.appendChild(el('span', 'rule-index', '🔒'));
+  const main = el('div', 'row-main');
+  main.appendChild(el('div', 'rule-text', r));
+  row.appendChild(main);
+  const acts = el('div', 'row-actions');
+  acts.appendChild(el('span', 'builtin-tag', label));
+  row.appendChild(acts);
+  return row;
 }
 
 async function loadRules() {
   try {
     const data = await api('/api/rules');
-    renderRules(data.rules || []);
+    renderRules(data);
   } catch (err) {
     toast(err.message, true);
   }
@@ -256,7 +275,8 @@ $('rule-add').onclick = async () => {
       method: 'POST',
       body: JSON.stringify({ rule }),
     });
-    renderRules(data.rules || []);
+    void data;
+    await loadRules();
     $('rule-input').value = '';
     toast('规则已添加');
   } catch (err) {
