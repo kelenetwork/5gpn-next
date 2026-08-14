@@ -142,7 +142,7 @@ func Default() *Config {
 		// Rules 只存用户自定义规则；基础规则已内置（见 BuiltinPre/BuiltinPost），
 		// 不进配置文件，用户无法误删。
 		Rules:      nil,
-		Final:      "proxy",
+		Final:      "direct",
 		ClientCIDR: "172.22.0.0/16",
 		Panel:      PanelConfig{Enabled: true},
 		Android: AndroidConfig{
@@ -223,6 +223,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
 	c.Rules = stripBuiltin(c.Rules)
+	// 迁移：旧版本无节点安装时 final 写成悬空的 "proxy"（无目标出口名），
+	// 语义上等于本机直出，归一为 "direct"，让 DIRECT 正确显示为当前出口。
+	if c.Final == "proxy" || c.Final == "" {
+		c.Final = "direct"
+	}
 	return c, c.Validate()
 }
 

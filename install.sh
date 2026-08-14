@@ -189,7 +189,7 @@ fi
 step "配置出口"
 
 EGRESS_JSON='{ "name": "DIRECT", "type": "direct" }'
-FINAL="proxy"
+FINAL="direct"
 
 if [ -n "$NODE" ]; then
   umask 077
