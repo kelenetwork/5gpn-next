@@ -108,14 +108,9 @@ if [ -n "$BOT_TK" ]; then
   fi
 fi
 
-echo
-dim "设备类型：iOS 走系统 Relay（推荐），Android 走系统「私人 DNS」。"
-dim "启用 Android 会额外监听 853/80/443，需要云安全组放行这三个端口。"
-WANT_ANDROID=$(FGPN_ANDROID="${FGPN_ANDROID:-}" ask FGPN_ANDROID "是否启用 Android 支持？(y/N)" "N")
-case "$WANT_ANDROID" in
-  y|Y|yes|YES) ANDROID_ON=true ;;
-  *) ANDROID_ON=false ;;
-esac
+# iOS 与 Android 一并支持，无需选择。
+# iOS 走系统 Relay，Android 走系统「私人 DNS」，两条路径共用同一套分流策略。
+ANDROID_ON=true
 
 # 域名解析校验
 RESOLVED=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
@@ -491,14 +486,6 @@ for t in weibo.com chatgpt.com; do
   fi
 done
 
-if [ "$ANDROID_ON" = "true" ]; then
-  ANDROID_HINT="
-    Android：设置 → 网络和互联网 → 私人 DNS，填入 ${DOMAIN}"
-else
-  ANDROID_HINT="
-    Android：未启用。如需支持，把 config.json 的 android.enabled 改为 true"
-fi
-
 if [ -n "$BOT_TK" ]; then
   BOT_HINT="已启用。向你的 Bot 发送 /start 打开菜单。"
 else
@@ -512,7 +499,10 @@ $(printf '%s' "$C_OK")━━━━━━━━━━━━━━━━━━━�
 
   安装完成
 
-  接入方式${ANDROID_HINT}
+  Android
+    设置 → 网络和互联网 → 私人 DNS
+    选择「指定的私人 DNS 服务提供商主机名」，填入：
+    ${DOMAIN}
 
   iPhone / iPad（iOS 17+）
     用 Safari 打开以下链接安装描述文件（须走内网卡蜂窝数据）：

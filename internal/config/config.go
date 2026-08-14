@@ -149,7 +149,8 @@ func Default() *Config {
 		ClientCIDR: "172.22.0.0/16",
 		Panel:      PanelConfig{Enabled: true},
 		Android: AndroidConfig{
-			Enabled:    false,
+			// 默认启用：Android 与 iOS 一并支持，用户无需额外选择
+			Enabled:    true,
 			DoTListen:  ":853",
 			HTTPListen: ":80",
 			TLSListen:  ":443",
