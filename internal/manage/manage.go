@@ -117,12 +117,15 @@ func (m *Manager) Status(version string) Status {
 	eng := m.Policy
 	m.mu.RUnlock()
 
+	// final 可能是动作 "direct"（小写）而出口名叫 "DIRECT"，
+	// 必须忽略大小写比较，否则 DIRECT 永远显示为非当前，
+	// 界面上会多出一个无意义的「切到 DIRECT」。
 	cur := strings.TrimPrefix(cfg.Final, "proxy:")
 	var es []EgressStatus
 	for _, e := range cfg.Egress {
 		es = append(es, EgressStatus{
 			Name: e.Name, Type: e.Type, Addr: e.Addr,
-			Current: e.Name == cur,
+			Current: strings.EqualFold(e.Name, cur),
 		})
 	}
 
