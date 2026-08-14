@@ -30,7 +30,8 @@ import (
 const (
 	repo       = "kelenetwork/5gpn-next"
 	binPath    = "/usr/local/bin/5gpnd"
-	backupDir  = "/var/lib/5gpn-next/versions"
+	stateDir   = "/var/lib/5gpn-next"
+	backupDir  = stateDir + "/versions"
 	maxBinSize = 80 << 20
 )
 
@@ -137,7 +138,13 @@ func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
 	asset := fmt.Sprintf("5gpnd-linux-%s", arch)
 	base := fmt.Sprintf("https://github.com/%s/releases/download/%s", repo, tag)
 
-	tmpDir, err := os.MkdirTemp("", "5gpn-update-")
+	// staging 必须放在 stateDir（ReadWritePaths）下：
+	// 服务开启 PrivateTmp 时 /tmp 是私有挂载，
+	// 沙箱外的 systemd-run 安装通道看不到里面的文件。
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		return "", err
+	}
+	tmpDir, err := os.MkdirTemp(stateDir, "update-")
 	if err != nil {
 		return "", err
 	}
@@ -174,7 +181,7 @@ func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
 		_ = os.WriteFile(backup, b, 0o755)
 	}
 
-	if err := replaceBinary(binTmp); err != nil {
+	if err := installBinary(binTmp); err != nil {
 		return "", err
 	}
 
@@ -222,15 +229,7 @@ func (m *Manager) Rollback(ctx context.Context, tag string) (string, error) {
 	if b, err := os.ReadFile(binPath); err == nil {
 		_ = os.WriteFile(cur, b, 0o755)
 	}
-	b, err := os.ReadFile(backup)
-	if err != nil {
-		return "", err
-	}
-	tmp := binPath + ".new"
-	if err := os.WriteFile(tmp, b, 0o755); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, binPath); err != nil {
+	if err := installBinary(backup); err != nil {
 		return "", err
 	}
 	if err := systemctl(ctx, "restart", "5gpn-next.service"); err != nil {
@@ -244,12 +243,7 @@ func (m *Manager) Rollback(ctx context.Context, tag string) (string, error) {
 }
 
 func (m *Manager) rollbackFile(backup string) {
-	if b, err := os.ReadFile(backup); err == nil {
-		tmp := binPath + ".rb"
-		if os.WriteFile(tmp, b, 0o755) == nil {
-			_ = os.Rename(tmp, binPath)
-		}
-	}
+	_ = installBinary(backup)
 }
 
 // ---------- 内部工具 ----------
@@ -279,6 +273,39 @@ func (m *Manager) download(ctx context.Context, url, dst string, limit int64) er
 	}
 	if n == 0 {
 		return fmt.Errorf("下载内容为空")
+	}
+	return nil
+}
+
+// installBinary 把 src 安装为 binPath（原子替换）。
+//
+// 服务 unit 使用 ProtectSystem=full 沙箱，进程内 /usr 是只读挂载，
+// 直接写入会得到 EROFS。此时降级为 systemd-run：请求 PID 1 在
+// 沙箱之外以瞬态单元执行复制，不放宽服务本身的沙箱限制。
+// src 必须位于沙箱内外都可见的真实路径（如 stateDir）。
+func installBinary(src string) error {
+	directErr := replaceBinary(src)
+	if directErr == nil {
+		return nil
+	}
+	if err := installViaSystemdRun(src); err != nil {
+		return fmt.Errorf("直接写入失败（%v），沙箱外安装也失败: %w", directErr, err)
+	}
+	return nil
+}
+
+func installViaSystemdRun(src string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	script := fmt.Sprintf(
+		"cp -f %q %q.new && chmod 755 %q.new && mv -f %q.new %q",
+		src, binPath, binPath, binPath, binPath)
+	out, err := exec.CommandContext(ctx, "systemd-run",
+		"--quiet", "--wait", "--collect",
+		"--property=Type=oneshot",
+		"/bin/sh", "-c", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
