@@ -288,6 +288,26 @@ step "生成配置"
 
 TOKEN=$(head -c 20 /dev/urandom | od -An -tx1 | tr -d ' \n')
 DLPATH="/dl/$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')/5gpn-next.mobileconfig"
+
+# 重装时沿用既有 Token 与描述文件路径：
+# Token 写死在手机描述文件里，换掉 = 所有已装描述文件立即失效断网。
+if [ -s "$CFGDIR/config.json" ]; then
+  OLD_TOKEN=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("relay",{}).get("token",""))' "$CFGDIR/config.json" 2>/dev/null || true)
+  OLD_DLPATH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("relay",{}).get("profile_path",""))' "$CFGDIR/config.json" 2>/dev/null || true)
+  if [ -z "$OLD_TOKEN" ]; then
+    OLD_TOKEN=$(sed -n '/"relay"/,/}/s/.*"token": *"\([0-9a-f]\{16,\}\)".*/\1/p' "$CFGDIR/config.json" | head -1)
+  fi
+  if [ -z "$OLD_DLPATH" ]; then
+    OLD_DLPATH=$(sed -n 's/.*"profile_path": *"\([^"]*\)".*/\1/p' "$CFGDIR/config.json" | head -1)
+  fi
+  if [ -n "$OLD_TOKEN" ]; then
+    TOKEN="$OLD_TOKEN"
+    ok "沿用既有鉴权 Token —— 已安装的描述文件继续有效，无需重装"
+  fi
+  if [ -n "$OLD_DLPATH" ]; then
+    DLPATH="$OLD_DLPATH"
+  fi
+fi
 # Bot 管理员 JSON 数组
 BOT_IDS_JSON=$(printf '%s' "$BOT_IDS" | tr -d ' ' | sed 's/,\{2,\}/,/g; s/^,//; s/,$//')
 
