@@ -114,11 +114,28 @@ func (e *Engine) RegisterCIDRSet(name string, cs *ruleset.CIDRSet) {
 	e.cidrSets[name] = cs
 }
 
-// SetFinal 设置兜底动作。
+// SetFinal 设置兜底动作。FINAL 只处理未命中任何规则的流量。
 func (e *Engine) SetFinal(a Action, egress string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.final = Decision{Action: a, Egress: egress, Rule: "FINAL", Index: -1}
+}
+
+// Final 返回当前运行态的兜底决策。
+func (e *Engine) Final() Decision {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.final
+}
+
+// DomesticRulesReady 报告国内直连的两套强制规则是否都已有效载入。
+// 仅“注册了名字”不够，空规则集同样视为未就绪。
+func (e *Engine) DomesticRulesReady() bool {
+	e.mu.RLock()
+	ds := e.domainSets["cn-domain"]
+	cs := e.cidrSets["geoip:cn"]
+	e.mu.RUnlock()
+	return ds != nil && ds.Len() > 0 && cs != nil && cs.Len() > 0
 }
 
 // AddRule 追加一条规则，顺序即优先级。

@@ -216,7 +216,7 @@ func (p *Panel) apiEgress(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		var body struct {
-			Action string `json:"action"` // add | switch | remove
+			Action string `json:"action"` // add | switch | remove | test
 			Name   string `json:"name"`
 			Link   string `json:"link"`
 		}
@@ -231,10 +231,16 @@ func (p *Panel) apiEgress(w http.ResponseWriter, r *http.Request) {
 			msg, err = p.Manager.AddEgress(body.Name, body.Link)
 		case "switch":
 			err = p.Manager.SwitchEgress(body.Name)
-			msg = "已切换到 " + body.Name
+			msg = "国外默认出口已切换到 " + body.Name
 		case "remove":
 			err = p.Manager.RemoveEgress(body.Name)
 			msg = "已删除 " + body.Name
+		case "test":
+			var d time.Duration
+			d, err = p.Manager.TestEgress(body.Name)
+			if err == nil {
+				msg = fmt.Sprintf("出口 %s 连通，端到端耗时 %dms", body.Name, d.Milliseconds())
+			}
 		default:
 			err = fmt.Errorf("未知操作")
 		}

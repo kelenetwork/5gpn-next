@@ -261,9 +261,12 @@ EOF
 
   EGRESS_JSON='{ "name": "DIRECT", "type": "direct" },
     { "name": "node", "type": "socks5", "addr": "127.0.0.1:7891", "has_ipv6": false }'
-  FINAL="proxy:node"
+  # 只登记节点，不在安装阶段擅自切换国外默认出口。
+  # 用户应在 Bot/面板确认国内规则与节点连通均正常后再切换。
+  FINAL="direct"
+  warn "节点已添加；国外默认出口仍为 DIRECT，请在 Bot/面板验证后手动切换"
 else
-  warn "未配置落地节点，外网流量将由本机直出"
+  warn "未配置落地节点，国外流量将由本机 DIRECT 直出"
 fi
 
 # Android 需要一个"客户端可路由到"的网关地址写入 DNS 应答。

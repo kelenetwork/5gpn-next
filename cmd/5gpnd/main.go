@@ -1,0 +1,768 @@
+// 5gpnd 是 5gpn-NEXT 的网关守护进程与命令行工具。
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/netip"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/kelenetwork/5gpn-next/internal/bot"
+	"github.com/kelenetwork/5gpn-next/internal/config"
+	"github.com/kelenetwork/5gpn-next/internal/egress"
+	"github.com/kelenetwork/5gpn-next/internal/ingress/dot"
+	"github.com/kelenetwork/5gpn-next/internal/ingress/relay"
+	"github.com/kelenetwork/5gpn-next/internal/ingress/sniff"
+	"github.com/kelenetwork/5gpn-next/internal/manage"
+	"github.com/kelenetwork/5gpn-next/internal/node"
+	"github.com/kelenetwork/5gpn-next/internal/policy"
+	"github.com/kelenetwork/5gpn-next/internal/probe"
+	"github.com/kelenetwork/5gpn-next/internal/profile"
+	"github.com/kelenetwork/5gpn-next/internal/ruleset"
+	"github.com/kelenetwork/5gpn-next/internal/stats"
+	"github.com/kelenetwork/5gpn-next/internal/trace"
+	"github.com/kelenetwork/5gpn-next/internal/update"
+	"github.com/kelenetwork/5gpn-next/internal/web"
+)
+
+var version = "dev"
+
+func main() {
+	log.SetFlags(0)
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+
+	cmd := os.Args[1]
+	args := os.Args[2:]
+
+	var err error
+	switch cmd {
+	case "run":
+		err = cmdRun(args)
+	case "probe":
+		err = cmdProbe(args)
+	case "profile":
+		err = cmdProfile(args)
+	case "node-config":
+		err = cmdNodeConfig(args)
+	case "check":
+		err = cmdCheck(args)
+	case "version", "-v", "--version":
+		fmt.Printf("5gpn-next %s\n", version)
+	case "help", "-h", "--help":
+		usage()
+	default:
+		usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		log.Fatalf("错误: %v", err)
+	}
+}
+
+func usage() {
+	fmt.Print(`5gpn-NEXT — 基于 Apple Network Relay 的 NPN 网关
+
+用法:
+  5gpnd run     -c <配置文件>            启动网关
+  5gpnd probe   -c <配置文件> <目标>      端到端诊断（逐层输出）
+  5gpnd profile -c <配置文件> -o <输出>   生成 iOS 描述文件
+  5gpnd check   -c <配置文件>            校验配置（不启动服务）
+  5gpnd node-config -link <文件> -out <文件>  由分享链接生成 mihomo 出口配置
+  5gpnd version
+
+说明:
+  probe 用于自助排障，会逐层打印 入口→策略→出口→连接→应用 的结果，
+  失败时精确指出是哪一层，而不是笼统的"连不上"。
+`)
+}
+
+// ---------- 公共装配 ----------
+
+type app struct {
+	cfg    *config.Config
+	engine *policy.Engine
+	reg    *egress.Registry
+}
+
+func setup(cfgPath string, loadRules bool) (*app, error) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+
+	reg := egress.NewRegistry()
+	for _, e := range cfg.Egress {
+		switch e.Type {
+		case "direct":
+			if e.Name != "DIRECT" {
+				reg.Register(egress.NewDirect(e.Name))
+			}
+		case "socks5":
+			reg.Register(egress.NewSocks5(e.Name, e.Addr, e.HasIPv6))
+		}
+	}
+
+	eng := policy.New()
+	eng.SetEgressHasV6(reg.Direct().HasIPv6())
+
+	if loadRules {
+		if err := loadRuleSets(cfg, eng); err != nil {
+			return nil, err
+		}
+	}
+	if err := applyRules(cfg, eng); err != nil {
+		return nil, err
+	}
+	return &app{cfg: cfg, engine: eng, reg: reg}, nil
+}
+
+func loadRuleSets(cfg *config.Config, eng *policy.Engine) error {
+	cacheDir := "/var/lib/5gpn-next/rulesets"
+	f := ruleset.NewFetcher(cacheDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	for _, rs := range cfg.RuleSets {
+		src := rs.Path
+		if src == "" {
+			// 缓存优先：有缓存立即用，服务秒级起监听；
+			// 联网刷新由后台任务完成，不阻塞启动。
+			// 否则每次升级/重启都要现场下载几 MB 规则库，
+			// 期间 Relay 不在线，手机直接断网。
+			if p, ok := f.Cached(rs.Name); ok {
+				src = p
+			} else {
+				p, err := f.Fetch(ctx, rs.Name, rs.URL)
+				if err != nil {
+					log.Printf("警告: 规则集 %s 载入失败: %v（该规则将不生效）", rs.Name, err)
+					continue
+				}
+				src = p
+			}
+		}
+		switch rs.Kind {
+		case "domain":
+			ds, err := ruleset.LoadDomainFile(src)
+			if err != nil {
+				log.Printf("警告: 解析域名规则集 %s 失败: %v", rs.Name, err)
+				continue
+			}
+			eng.RegisterDomainSet(rs.Name, ds)
+			log.Printf("规则集 %s: %d 条域名", rs.Name, ds.Len())
+		case "ipcidr":
+			cs, err := ruleset.LoadCIDRFile(src)
+			if err != nil {
+				log.Printf("警告: 解析 CIDR 规则集 %s 失败: %v", rs.Name, err)
+				continue
+			}
+			eng.RegisterCIDRSet(rs.Name, cs)
+			log.Printf("规则集 %s: %d 条网段", rs.Name, cs.Len())
+		default:
+			return fmt.Errorf("规则集 %s 类型未知: %s", rs.Name, rs.Kind)
+		}
+	}
+	return nil
+}
+
+// applyRules 把配置里的规则字符串编译进引擎。
+//
+// 规则格式: TYPE,VALUE,ACTION   例如 DOMAIN-SUFFIX,openai.com,proxy:us-1
+func applyRules(cfg *config.Config, eng *policy.Engine) error {
+	// 编译顺序：内置前置（私网保护）→ 用户规则 → 内置兜底（国内直连）。
+	// 内置规则不在配置文件里，Bot/面板改不到也删不掉。
+	all := append(append(config.BuiltinPre(), cfg.Rules...), config.BuiltinPost()...)
+	for i, line := range all {
+		parts := strings.Split(strings.TrimSpace(line), ",")
+		if len(parts) < 3 {
+			return fmt.Errorf("第 %d 条规则格式错误: %q", i+1, line)
+		}
+		kind := policy.RuleKind(strings.ToUpper(strings.TrimSpace(parts[0])))
+		val := strings.TrimSpace(parts[1])
+		act, eg := parseAction(strings.TrimSpace(parts[2]))
+
+		if err := eng.AddRule(policy.Rule{
+			Kind: kind, Value: val, Action: act, Egress: eg,
+		}); err != nil {
+			// 规则集缺失时降级跳过，不让整个网关起不来
+			log.Printf("警告: 跳过第 %d 条规则 %q: %v", i+1, line, err)
+		}
+	}
+	act, eg := parseAction(cfg.Final)
+	// 安全边界：选了代理出口但国内直连规则尚未就绪时，绝不能把
+	// FINAL 直接放行到代理，否则会退化成“国内外全局代理”。
+	// 启动期先在运行态回落 DIRECT；后台规则刷新成功后会热重载，
+	// 恢复磁盘里原本选择的国外出口。
+	if act == policy.ActionProxy && !eng.DomesticRulesReady() {
+		log.Printf("严重警告: 国内直连规则未完整载入，FINAL 运行态暂时回落 DIRECT，防止国内流量误走代理")
+		act, eg = policy.ActionDirect, ""
+	}
+	eng.SetFinal(act, eg)
+	return nil
+}
+
+func parseAction(s string) (policy.Action, string) {
+	s = strings.TrimSpace(s)
+	switch {
+	case s == "direct":
+		return policy.ActionDirect, ""
+	case s == "block", s == "reject":
+		return policy.ActionBlock, ""
+	case s == "proxy":
+		return policy.ActionProxy, ""
+	case strings.HasPrefix(s, "proxy:"):
+		return policy.ActionProxy, strings.TrimPrefix(s, "proxy:")
+	}
+	return policy.ActionProxy, s
+}
+
+// ---------- run ----------
+
+// jsonlRecorder 把 trace 写成结构化日志。
+type jsonlRecorder struct {
+	mu sync.Mutex
+	f  *os.File
+}
+
+func (r *jsonlRecorder) Record(t *trace.Trace) {
+	if r == nil || r.f == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.f.Write(append(t.JSON(), '\n'))
+}
+
+func cmdRun(args []string) error {
+	cfgPath := flagValue(args, "-c", "/etc/5gpn-next/config.json")
+	a, err := setup(cfgPath, true)
+	if err != nil {
+		return err
+	}
+
+	var rec *jsonlRecorder
+	if a.cfg.LogPath != "" {
+		if err := os.MkdirAll(dirOf(a.cfg.LogPath), 0o755); err == nil {
+			if f, err := os.OpenFile(a.cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+				rec = &jsonlRecorder{f: f}
+				defer f.Close()
+			}
+		}
+	}
+
+	var profBytes []byte
+	if a.cfg.Relay.ProfilePath != "" {
+		opts := profile.Default(a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
+		opts.Token = a.cfg.Relay.Token
+		opts.ExcludedDomains = a.cfg.ExcludedDomains
+		if b, err := opts.Build(); err == nil {
+			profBytes = b
+		}
+	}
+
+	srv := &relay.Server{
+		Token:        a.cfg.Relay.Token,
+		Recorder:     rec,
+		Identity:     a.cfg.Relay.Host,
+		ProfilePath:  a.cfg.Relay.ProfilePath,
+		ProfileBytes: profBytes,
+	}
+	srv.SetRuntime(a.engine, a.reg)
+
+	// 不能用 http.ServeMux 包裹 Relay。
+	// CONNECT 是 authority-form 请求（r.URL.Path 为空），ServeMux 会判定需要
+	// 规范化并回 301 Moved Permanently，隧道永远建立不起来。
+	// 因此这里手写分发：非 CONNECT 且命中管理路径时才走管理处理器。
+	// 管理层：Bot 与 Web 面板共用同一套动作实现
+	mgr := manage.New(cfgPath, a.cfg, a.engine, a.reg)
+	mgr.Stats = statsSnapshot{srv}
+	if a.cfg.Relay.ProfilePath != "" {
+		mgr.ProfileURL = fmt.Sprintf("https://%s:%d%s",
+			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), a.cfg.Relay.ProfilePath)
+	}
+	// 流量统计：只保留聚合数据，不落原始访问日志
+	traffic := stats.New("/var/lib/5gpn-next/traffic.json")
+	mgr.Traffic = traffic
+	trafficDone := make(chan struct{})
+	defer close(trafficDone)
+	go traffic.RunFlusher(trafficDone, 60*time.Second)
+	srv.OnConn = traffic.Conn
+
+	// 版本管理
+	updater := update.New(version)
+	mgr.Updater = updater
+
+	// 描述文件生成器：供 Bot 直接以文件形式下发
+	mgr.ProfileBytes = func() ([]byte, error) {
+		o := profile.Default(a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
+		o.Token = a.cfg.Relay.Token
+		o.ExcludedDomains = a.cfg.ExcludedDomains
+		return o.Build()
+	}
+	mgr.AndroidInfo = func() manage.AndroidGuide {
+		g := manage.AndroidGuide{
+			Enabled:   a.cfg.Android.Enabled,
+			DoTHost:   a.cfg.Relay.Host,
+			GatewayIP: a.cfg.Android.GatewayIP,
+		}
+		if g.Enabled {
+			g.Note = "国内网站直连，国外网站经网关分流；无需安装任何应用。"
+		}
+		return g
+	}
+
+	// 配置变更后重建策略与出口，无需重启进程
+	mgr.Reload = func() (*policy.Engine, *egress.Registry, error) {
+		nb, err := setup(cfgPath, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		// 原子替换指针；绝不复制含 sync.RWMutex 的结构体。
+		// Manager 的运行态由调用方（Manager 内部）装配，
+		// 这里不得回调 mgr 的加锁方法，避免死锁。
+		srv.SetRuntime(nb.engine, nb.reg)
+		a.engine, a.reg, a.cfg = nb.engine, nb.reg, nb.cfg
+		return nb.engine, nb.reg, nil
+	}
+
+	// 规则集后台刷新：启动用缓存秒起，下载移到后台；
+	// 刷新成功后热重载引擎，服务全程在线。
+	refreshCtx, refreshCancel := context.WithCancel(context.Background())
+	defer refreshCancel()
+	go func() {
+		fetcher := ruleset.NewFetcher("/var/lib/5gpn-next/rulesets")
+		// 启动后先刷一轮（缓存可能已陈旧或不存在）
+		for {
+			changed := false
+			for _, rs := range a.cfg.RuleSets {
+				if rs.Path != "" || rs.URL == "" {
+					continue
+				}
+				fctx, fcancel := context.WithTimeout(refreshCtx, 120*time.Second)
+				_, err := fetcher.Fetch(fctx, rs.Name, rs.URL)
+				fcancel()
+				if err != nil {
+					log.Printf("规则集 %s 后台刷新失败: %v（继续用缓存）", rs.Name, err)
+					continue
+				}
+				changed = true
+			}
+			if changed {
+				if err := mgr.ReloadRuntime(); err != nil {
+					log.Printf("规则集刷新后重载失败: %v", err)
+				} else {
+					log.Printf("规则集已后台刷新并生效")
+				}
+			}
+			select {
+			case <-refreshCtx.Done():
+				return
+			case <-time.After(24 * time.Hour):
+			}
+		}
+	}()
+
+	// 内网 Web 面板：挂在根路径，仅内网卡来源可达，无需登录
+	var panelHandler http.Handler
+	if a.cfg.Panel.Enabled {
+		p, err := web.New(mgr, version, []string{a.cfg.ClientCIDR})
+		if err != nil {
+			return fmt.Errorf("初始化面板失败: %w", err)
+		}
+		panelHandler = p.Handler()
+		log.Printf("内网面板已启用: https://%s:%d/（仅 %s 可访问）",
+			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), a.cfg.ClientCIDR)
+	}
+
+	// Android 接入路径：DoT + SNI/Host 嗅探
+	//
+	// 与 iOS 的 Relay 不同，Android 系统只有「私密 DNS」一个入口，
+	// 拿不到应用层目的地，只能靠 DNS 改写把流量引回网关再嗅探还原。
+	ingressCtx, ingressCancel := context.WithCancel(context.Background())
+	defer ingressCancel()
+
+	if a.cfg.Android.Enabled {
+		gwIP, perr := netip.ParseAddr(a.cfg.Android.GatewayIP)
+		if perr != nil {
+			return fmt.Errorf("android.gateway_ip 无效: %w", perr)
+		}
+		clientPfx, perr := netip.ParsePrefix(a.cfg.ClientCIDR)
+		if perr != nil {
+			return fmt.Errorf("client_cidr 无效: %w", perr)
+		}
+
+		sn := &sniff.Server{
+			Policy:   srv.Policy,
+			Egress:   srv.Egress,
+			Recorder: rec,
+			OnConn:   traffic.Conn,
+		}
+		go func() {
+			if e := sn.ListenAndServe(ingressCtx, a.cfg.Android.TLSListen, true); e != nil {
+				log.Printf("Android TLS 入口退出: %v", e)
+			}
+		}()
+		go func() {
+			if e := sn.ListenAndServe(ingressCtx, a.cfg.Android.HTTPListen, false); e != nil {
+				log.Printf("Android HTTP 入口退出: %v", e)
+			}
+		}()
+
+		ds := &dot.Server{
+			Listen:     a.cfg.Android.DoTListen,
+			GatewayIP:  gwIP,
+			ClientCIDR: clientPfx,
+			Upstream:   a.cfg.Android.Upstream,
+			CertFile:   a.cfg.Relay.CertFile,
+			KeyFile:    a.cfg.Relay.KeyFile,
+			Policy:     srv.Policy,
+		}
+		go func() {
+			if e := ds.ListenAndServe(ingressCtx); e != nil {
+				log.Printf("DoT 入口退出: %v", e)
+			}
+		}()
+	}
+
+	// Telegram Bot
+	botCtx, botCancel := context.WithCancel(context.Background())
+	defer botCancel()
+	if a.cfg.Bot.Token != "" && len(a.cfg.Bot.Admins) > 0 {
+		tb := bot.New(a.cfg.Bot.Token, a.cfg.Bot.Admins, mgr, version)
+		if panelHandler != nil {
+			tb.PanelURL = fmt.Sprintf("https://%s:%d/",
+				a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
+		}
+		go tb.Run(botCtx)
+
+		// 启动通知只在版本变化时发一次：
+		// 日常 restart / 崩溃拉起不再刷屏。
+		if markStartupNotified(version) {
+			go func() {
+				time.Sleep(2 * time.Second)
+				tb.Notify(botCtx, "✅ <b>5gpn-NEXT 已就绪</b>\n\n"+
+					"版本  <code>"+version+"</code>\n"+
+					"发送 /start 打开管理菜单")
+			}()
+		}
+
+		// 周期检查新版本并推送。默认只通知不安装，
+		// 避免在用户不知情时替换正在运行的二进制。
+		if a.cfg.Update.CheckEnabled {
+			iv := time.Duration(a.cfg.Update.IntervalHours) * time.Hour
+			if iv <= 0 {
+				iv = 12 * time.Hour
+			}
+			go func() {
+				t := time.NewTicker(iv)
+				defer t.Stop()
+				for {
+					select {
+					case <-botCtx.Done():
+						return
+					case <-t.C:
+					}
+					cctx, cancel := context.WithTimeout(botCtx, 60*time.Second)
+					has, rel, err := updater.HasUpdate(cctx)
+					cancel()
+					if err != nil || !has || !updater.ShouldNotify(rel.Tag) {
+						continue
+					}
+					tb.Notify(botCtx, fmt.Sprintf(
+						"\U0001F514 <b>发现新版本 %s</b>%s当前 <code>%s</code>%s%s%s在菜单「更新」中可一键升级。",
+						rel.Tag, nl2, version, nl2, htmlPre(rel.Notes, 800), nl2))
+					if a.cfg.Update.AutoApply {
+						actx, acancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						if out, aerr := updater.Apply(actx, rel.Tag); aerr == nil {
+							tb.Notify(botCtx, "\u2705 "+out)
+						} else {
+							tb.Notify(botCtx, "\u26A0\uFE0F 自动升级失败："+aerr.Error())
+						}
+						acancel()
+					}
+				}
+			}()
+		}
+	}
+
+	statsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.cfg.Relay.Token != "" && r.Header.Get(relay.TokenHeader) != a.cfg.Relay.Token {
+			http.Error(w, "forbidden", http.StatusProxyAuthRequired)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"version":     version,
+			"connect":     srv.Stats.Connect.Load(),
+			"blocked":     srv.Stats.Blocked.Load(),
+			"auth_fail":   srv.Stats.AuthFail.Load(),
+			"dial_fail":   srv.Stats.DialFail.Load(),
+			"v6_fastfail": srv.Stats.V6FastFail.Load(),
+			"pvd":         srv.Stats.PvD.Load(),
+			"udp_attempt": srv.Stats.UDPAttempt.Load(),
+			"rules":       a.engine.Len(),
+			"egress":      a.reg.Names(),
+		})
+	})
+
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			switch {
+			case r.URL.Path == "/5gpn/stats":
+				statsHandler.ServeHTTP(w, r)
+				return
+			// PvD 与描述文件下载仍由 Relay 处理
+			case strings.HasPrefix(r.URL.Path, "/.well-known/"):
+			case a.cfg.Relay.ProfilePath != "" && r.URL.Path == a.cfg.Relay.ProfilePath:
+			default:
+				if panelHandler != nil {
+					panelHandler.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+		srv.ServeHTTP(w, r)
+	})
+
+	cert, err := tls.LoadX509KeyPair(a.cfg.Relay.CertFile, a.cfg.Relay.KeyFile)
+	if err != nil {
+		return fmt.Errorf("加载证书失败: %w", err)
+	}
+
+	hs := &http.Server{
+		Addr:    a.cfg.Relay.Listen,
+		Handler: root,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"h2", "http/1.1"},
+		},
+		IdleTimeout: 10 * time.Minute,
+	}
+
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		hs.Shutdown(ctx)
+	}()
+
+	log.Printf("5gpn-next %s 启动 listen=%s rules=%d egress=%v ipv6=%v",
+		version, a.cfg.Relay.Listen, a.engine.Len(), a.reg.Names(), a.engine.EgressHasV6())
+
+	if err := hs.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// ---------- probe ----------
+
+func cmdProbe(args []string) error {
+	cfgPath := flagValue(args, "-c", "/etc/5gpn-next/config.json")
+	target := lastNonFlag(args)
+	if target == "" {
+		return fmt.Errorf("请指定目标，例如: 5gpnd probe -c /etc/5gpn-next/config.json chatgpt.com")
+	}
+	a, err := setup(cfgPath, true)
+	if err != nil {
+		return err
+	}
+	p := &probe.Prober{Policy: a.engine, Egress: a.reg}
+	tr := p.Run(context.Background(), manage.NormalizeTarget(target))
+	fmt.Print(tr.Human())
+	if !tr.OK() {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// ---------- profile ----------
+
+func cmdProfile(args []string) error {
+	cfgPath := flagValue(args, "-c", "/etc/5gpn-next/config.json")
+	out := flagValue(args, "-o", "")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	opts := profile.Default(cfg.Relay.Host, portOf(cfg.Relay.Listen))
+	opts.Token = cfg.Relay.Token
+	opts.ExcludedDomains = cfg.ExcludedDomains
+	b, err := opts.Build()
+	if err != nil {
+		return err
+	}
+	if out == "" || out == "-" {
+		os.Stdout.Write(b)
+		return nil
+	}
+	if err := os.WriteFile(out, b, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("已生成 %s\n  relay = https://%s:%d/\n  直连域名 = %d 条\n",
+		out, cfg.Relay.Host, portOf(cfg.Relay.Listen), len(cfg.ExcludedDomains))
+	return nil
+}
+
+// ---------- 小工具 ----------
+
+func flagValue(args []string, name, def string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == name {
+			return args[i+1]
+		}
+	}
+	return def
+}
+
+func lastNonFlag(args []string) string {
+	for i := len(args) - 1; i >= 0; i-- {
+		if strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		if i > 0 && strings.HasPrefix(args[i-1], "-") {
+			continue
+		}
+		return args[i]
+	}
+	return ""
+}
+
+func portOf(listen string) int {
+	i := strings.LastIndex(listen, ":")
+	if i < 0 {
+		return 443
+	}
+	p := 0
+	for _, c := range listen[i+1:] {
+		if c < '0' || c > '9' {
+			return 443
+		}
+		p = p*10 + int(c-'0')
+	}
+	if p == 0 {
+		return 443
+	}
+	return p
+}
+
+func dirOf(p string) string {
+	i := strings.LastIndex(p, "/")
+	if i <= 0 {
+		return "."
+	}
+	return p[:i]
+}
+
+// ---------- check ----------
+
+func cmdCheck(args []string) error {
+	cfgPath := flagValue(args, "-c", "/etc/5gpn-next/config.json")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	// 只做静态校验，不拉取远程规则集，便于安装脚本快速验证
+	eng := policy.New()
+	if err := applyRules(cfg, eng); err != nil {
+		return err
+	}
+	fmt.Printf("配置有效: %s\n  监听=%s 出口=%d 规则=%d\n",
+		cfgPath, cfg.Relay.Listen, len(cfg.Egress), len(cfg.Rules))
+	return nil
+}
+
+// ---------- node-config ----------
+
+func cmdNodeConfig(args []string) error {
+	linkPath := flagValue(args, "-link", "")
+	outPath := flagValue(args, "-out", "")
+	socks := portOf(":" + flagValue(args, "-socks", "7891"))
+	if linkPath == "" || outPath == "" {
+		return fmt.Errorf("用法: 5gpnd node-config -link <链接文件> -out <输出文件> [-socks 7891]")
+	}
+
+	raw, err := os.ReadFile(linkPath)
+	if err != nil {
+		return fmt.Errorf("读取节点链接失败: %w", err)
+	}
+	n, err := node.Parse(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return err
+	}
+	yaml, err := n.MihomoConfig(socks)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(outPath, []byte(yaml), 0o600); err != nil {
+		return err
+	}
+	// 只打印脱敏摘要，绝不回显密钥
+	fmt.Printf("  节点解析成功: %s\n", n.Redacted())
+	if n.Name != "" {
+		fmt.Printf("  备注名: %s\n", n.Name)
+	}
+	return nil
+}
+
+// statsSnapshot 把 relay 的计数器适配为 manage.StatsSource。
+type statsSnapshot struct{ srv *relay.Server }
+
+func (s statsSnapshot) Snapshot() map[string]int64 {
+	return map[string]int64{
+		"connect":     s.srv.Stats.Connect.Load(),
+		"blocked":     s.srv.Stats.Blocked.Load(),
+		"auth_fail":   s.srv.Stats.AuthFail.Load(),
+		"dial_fail":   s.srv.Stats.DialFail.Load(),
+		"v6_fastfail": s.srv.Stats.V6FastFail.Load(),
+		"pvd":         s.srv.Stats.PvD.Load(),
+		"udp_attempt": s.srv.Stats.UDPAttempt.Load(),
+	}
+}
+
+// markStartupNotified 判断本次启动是否需要推送启动通知。
+//
+// 规则：状态文件里记录的版本与当前一致 → 普通重启，不再打扰；
+// 版本变化（升级/回退/首装）→ 通知一次并落盘。
+// 状态目录不可写时保守起见仍通知（宁可多一条，不吞掉升级结果）。
+func markStartupNotified(version string) bool {
+	const marker = "/var/lib/5gpn-next/last-start-version"
+	if b, err := os.ReadFile(marker); err == nil &&
+		strings.TrimSpace(string(b)) == version {
+		return false
+	}
+	_ = os.MkdirAll("/var/lib/5gpn-next", 0o750)
+	_ = os.WriteFile(marker, []byte(version+"\n"), 0o640)
+	return true
+}
+
+// nl2 是两个换行，避免在字符串字面量里内联转义序列。
+const nl2 = "\n\n"
+
+// htmlPre 把发布说明包成可安全发送的 <pre> 片段。
+func htmlPre(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) > limit {
+		s = string(r[:limit]) + "\n…"
+	}
+	rep := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return "<pre>" + rep.Replace(s) + "</pre>"
+}

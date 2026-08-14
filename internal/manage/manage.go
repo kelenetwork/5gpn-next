@@ -24,6 +24,7 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/node"
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/probe"
+	"github.com/kelenetwork/5gpn-next/internal/ruleset"
 	"github.com/kelenetwork/5gpn-next/internal/stats"
 	"github.com/kelenetwork/5gpn-next/internal/trace"
 	"github.com/kelenetwork/5gpn-next/internal/update"
@@ -97,16 +98,17 @@ func (m *Manager) SetRuntime(p *policy.Engine, e *egress.Registry) {
 
 // Status 是面板与 Bot 共用的状态快照。
 type Status struct {
-	Version   string           `json:"version"`
-	Uptime    string           `json:"uptime"`
-	Listen    string           `json:"listen"`
-	Host      string           `json:"host"`
-	Rules     int              `json:"rules"`
-	Egress    []EgressStatus   `json:"egress"`
-	Final     string           `json:"final"`
-	Counters  map[string]int64 `json:"counters"`
-	MemoryMB  float64          `json:"memory_mb"`
-	CertUntil string           `json:"cert_until,omitempty"`
+	Version       string           `json:"version"`
+	Uptime        string           `json:"uptime"`
+	Listen        string           `json:"listen"`
+	Host          string           `json:"host"`
+	Rules         int              `json:"rules"`
+	Egress        []EgressStatus   `json:"egress"`
+	Final         string           `json:"final"`
+	Counters      map[string]int64 `json:"counters"`
+	MemoryMB      float64          `json:"memory_mb"`
+	CertUntil     string           `json:"cert_until,omitempty"`
+	DomesticReady bool             `json:"domestic_ready"`
 }
 
 // EgressStatus 描述一个出口。
@@ -129,10 +131,14 @@ func (m *Manager) Status(version string) Status {
 	eng := m.Policy
 	m.mu.RUnlock()
 
-	// final 可能是动作 "direct"（小写）而出口名叫 "DIRECT"，
-	// 必须忽略大小写比较，否则 DIRECT 永远显示为非当前，
-	// 界面上会多出一个无意义的「切到 DIRECT」。
-	cur := strings.TrimPrefix(cfg.Final, "proxy:")
+	// 以运行态 FINAL 为准：国内规则未就绪时引擎会安全回落 DIRECT，
+	// 此时不能拿磁盘里的期望值冒充当前出口。
+	final := eng.Final()
+	effectiveFinal := "direct"
+	if final.Action == policy.ActionProxy {
+		effectiveFinal = "proxy:" + final.Egress
+	}
+	cur := strings.TrimPrefix(effectiveFinal, "proxy:")
 	var es []EgressStatus
 	for _, e := range cfg.Egress {
 		proto := e.Proto
@@ -148,14 +154,15 @@ func (m *Manager) Status(version string) Status {
 	}
 
 	st := Status{
-		Version:  version,
-		Uptime:   humanDuration(time.Since(m.started)),
-		Listen:   cfg.Relay.Listen,
-		Host:     cfg.Relay.Host,
-		Rules:    eng.Len(),
-		Egress:   es,
-		Final:    cfg.Final,
-		MemoryMB: memoryMB(),
+		Version:       version,
+		Uptime:        humanDuration(time.Since(m.started)),
+		Listen:        cfg.Relay.Listen,
+		Host:          cfg.Relay.Host,
+		Rules:         eng.Len(),
+		Egress:        es,
+		Final:         effectiveFinal,
+		MemoryMB:      memoryMB(),
+		DomesticReady: eng.DomesticRulesReady(),
 	}
 	if m.Stats != nil {
 		st.Counters = m.Stats.Snapshot()
@@ -451,6 +458,18 @@ func (m *Manager) SwitchEgress(name string) error {
 		return fmt.Errorf("出口 %q 不存在", name)
 	}
 
+	// 代理出口只承担“国外兜底”。切换前必须确认国内域名/IP 两套
+	// 直连规则均已加载；缺失时主动刷新，仍失败就拒绝切换。
+	// 这样规则源故障也不会让“国外出口”退化成国内外全局代理。
+	if name != "DIRECT" {
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+		err := m.ensureDomesticRules(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("国内直连规则未就绪，已拒绝切换，当前出口不变：%w", err)
+		}
+	}
+
 	// 切换前先验证：切到坏出口 = 手机侧全部国外流量当场失联，
 	// 必须在这里挡住，而不是让用户切完才发现没网。
 	if addr != "" {
@@ -468,6 +487,51 @@ func (m *Manager) SwitchEgress(name string) error {
 		m.Cfg.Final = "proxy:" + name
 	}
 	return m.saveAndReloadLocked()
+}
+
+// ensureDomesticRules 确保 cn-domain 与 geoip:cn 已加载。
+// 无缓存时现场下载一次，再热重载策略；任何失败都 fail-closed。
+func (m *Manager) ensureDomesticRules(ctx context.Context) error {
+	m.mu.RLock()
+	if m.Policy != nil && m.Policy.DomesticRulesReady() {
+		m.mu.RUnlock()
+		return nil
+	}
+	sets := append([]config.RuleSetConfig(nil), m.Cfg.RuleSets...)
+	m.mu.RUnlock()
+
+	required := map[string]bool{"cn-domain": false, "geoip:cn": false}
+	fetcher := ruleset.NewFetcher("/var/lib/5gpn-next/rulesets")
+	for _, rs := range sets {
+		if _, ok := required[rs.Name]; !ok {
+			continue
+		}
+		required[rs.Name] = true
+		if rs.Path != "" {
+			if st, err := os.Stat(rs.Path); err != nil || st.Size() == 0 {
+				return fmt.Errorf("规则集 %s 文件不可用", rs.Name)
+			}
+			continue
+		}
+		if _, err := fetcher.Fetch(ctx, rs.Name, rs.URL); err != nil {
+			return fmt.Errorf("刷新规则集 %s 失败: %w", rs.Name, err)
+		}
+	}
+	for name, present := range required {
+		if !present {
+			return fmt.Errorf("配置缺少必需规则集 %s", name)
+		}
+	}
+	if err := m.ReloadRuntime(); err != nil {
+		return fmt.Errorf("重载国内直连规则失败: %w", err)
+	}
+	m.mu.RLock()
+	ready := m.Policy != nil && m.Policy.DomesticRulesReady()
+	m.mu.RUnlock()
+	if !ready {
+		return fmt.Errorf("cn-domain / geoip:cn 内容为空或解析失败")
+	}
+	return nil
 }
 
 // ---------- 分流规则 ----------

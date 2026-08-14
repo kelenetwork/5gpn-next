@@ -528,6 +528,11 @@ func (b *Bot) showStatus(ctx context.Context, v view) {
 	fmt.Fprintf(&sb, "📡 监听　<code>%s</code>\n", html.EscapeString(st.Listen))
 	fmt.Fprintf(&sb, "💾 内存　<b>%.1f MB</b>\n", st.MemoryMB)
 	fmt.Fprintf(&sb, "📋 规则　<b>%d</b> 条\n", st.Rules)
+	if st.DomesticReady {
+		sb.WriteString("🇨🇳 国内　<b>直连规则已就绪</b>\n")
+	} else {
+		sb.WriteString("⚠️ 国内　<b>规则未就绪，国外出口已安全回落 DIRECT</b>\n")
+	}
 	if st.CertUntil != "" {
 		fmt.Fprintf(&sb, "🔐 证书　%s\n", html.EscapeString(st.CertUntil))
 	}
@@ -600,9 +605,12 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 	st := b.Manager.Status(b.Version)
 
 	var sb strings.Builder
-	sb.WriteString("🌐 <b>出口管理</b>\n")
+	sb.WriteString("🌐 <b>国外默认出口</b>\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString("<i>当前生效的出口决定外网流量从哪里出去。</i>\n\n")
+	sb.WriteString("<i>只决定未命中规则的国外流量出口；国内域名/IP 始终按内置规则 DIRECT，自定义分流规则保持独立。</i>\n\n")
+	if !st.DomesticReady {
+		sb.WriteString("⚠️ <b>国内直连规则尚未就绪</b>\n<blockquote>为防止退化成国内外全局代理，当前运行态已安全回落 DIRECT；切换代理出口时会先刷新规则。</blockquote>\n")
+	}
 
 	var rows [][]btn
 	for _, e := range st.Egress {
@@ -622,14 +630,14 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 		short := truncateText(disp, 12)
 		row := []btn{{"🧪 测 " + short, "test_egress:" + e.Name}}
 		if !e.Current {
-			row = append([]btn{{"切到 " + short, "switch:" + e.Name}}, row...)
+			row = append([]btn{{"国外走 " + short, "switch:" + e.Name}}, row...)
 		}
 		if e.Name != "DIRECT" {
 			row = append(row, btn{"🗑", "del_egress:" + e.Name})
 		}
 		rows = append(rows, row)
 	}
-	sb.WriteString("\n<i>● 为当前使用中的出口。删除当前出口会自动回落 DIRECT。</i>")
+	sb.WriteString("\n<i>● 仅表示国外兜底出口。删除当前出口会自动回落 KFC 本机 DIRECT。</i>")
 
 	rows = append(rows, []btn{{"➕ 添加出口", "ask_egress_add"}})
 	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})

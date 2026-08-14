@@ -3,7 +3,7 @@
 *.exe
 p0-relay
 5gpn-next
-5gpnd
+/5gpnd
 
 # 凭据 / 本地状态（绝不入库）
 .p0-token

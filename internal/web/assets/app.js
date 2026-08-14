@@ -69,12 +69,16 @@ function renderStatus(st) {
     grid.appendChild(box);
   }
 
-  renderEgress(st.egress || []);
+  renderEgress(st.egress || [], st.domestic_ready);
 }
 
-function renderEgress(list) {
+function renderEgress(list, domesticReady) {
   const box = $('egress-list');
   box.textContent = '';
+
+  if (domesticReady === false) {
+    box.appendChild(el('p', 'empty', '⚠ 国内直连规则未就绪：运行态已安全回落 DIRECT，代理出口暂不允许切换'));
+  }
 
   if (!list.length) {
     box.appendChild(el('p', 'empty', '暂无出口'));
@@ -86,21 +90,24 @@ function renderEgress(list) {
     const main = el('div', 'row-main');
 
     const title = el('div', 'row-title');
-    title.appendChild(el('span', null, e.name));
-    if (e.current) title.appendChild(el('span', 'tag tag-current', '当前'));
-    else title.appendChild(el('span', 'tag', e.type));
+    title.appendChild(el('span', null, e.display || e.name));
+    if (e.current) title.appendChild(el('span', 'tag tag-current', '国外兜底'));
+    title.appendChild(el('span', 'tag', e.type));
     main.appendChild(title);
 
-    if (e.addr) main.appendChild(el('div', 'row-sub', e.addr));
+    if (e.server) main.appendChild(el('div', 'row-sub', e.server));
     row.appendChild(main);
 
     const acts = el('div', 'row-actions');
     if (!e.current) {
-      const sw = el('button', 'btn btn-sm', '设为当前');
+      const sw = el('button', 'btn btn-sm', '设为国外出口');
       sw.onclick = () => egressAction('switch', { name: e.name });
       acts.appendChild(sw);
     }
-    if (e.name !== 'DIRECT' && !e.current) {
+    const test = el('button', 'btn btn-sm', '测试');
+    test.onclick = () => egressAction('test', { name: e.name });
+    acts.appendChild(test);
+    if (e.name !== 'DIRECT') {
       const rm = el('button', 'btn btn-sm btn-danger', '删除');
       rm.onclick = () => {
         if (confirm('确定删除出口 ' + e.name + '？')) {
