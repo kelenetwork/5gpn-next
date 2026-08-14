@@ -113,10 +113,17 @@ type RelayConfig struct {
 // EgressConfig 是一个出口。
 type EgressConfig struct {
 	Name string `json:"name"`
-	// Type: direct | socks5
+	// Type: direct | socks5（socks5 指对接本机 mihomo 实例的内部桥）
 	Type    string `json:"type"`
 	Addr    string `json:"addr,omitempty"`
 	HasIPv6 bool   `json:"has_ipv6,omitempty"`
+
+	// DisplayName 是节点原始备注名（可含 emoji/中文），仅用于展示。
+	DisplayName string `json:"display_name,omitempty"`
+	// Proto 是节点真实协议（ss/vless/trojan/...），仅用于展示。
+	Proto string `json:"proto,omitempty"`
+	// Server 是节点服务器 host:port，仅用于展示。
+	Server string `json:"server,omitempty"`
 }
 
 // RuleSetConfig 是一个规则集来源。

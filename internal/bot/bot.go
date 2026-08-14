@@ -386,14 +386,7 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 				"<code>trojan</code> <code>hysteria2</code> <code>tuic</code> "+
 				"<code>socks5</code> <code>http</code>")
 	case cmd == "ask_rule_add":
-		b.ask(ctx, v, "rule_add",
-			"➕ <b>添加分流规则</b>\n\n"+
-				"格式：<code>类型,值,动作</code>\n\n"+
-				"示例：\n"+
-				"<code>DOMAIN-SUFFIX,openai.com,proxy:node</code>\n"+
-				"<code>DOMAIN-SUFFIX,example.cn,direct</code>\n"+
-				"<code>DOMAIN-KEYWORD,ads,block</code>\n\n"+
-				"新规则会插入到最前面，优先匹配。")
+		b.askRuleAdd(ctx, v)
 	case cmd == "ask_probe":
 		b.ask(ctx, v, "probe",
 			"🩺 <b>连通性诊断</b>\n\n"+
@@ -412,6 +405,9 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showRollback(ctx, v)
 	case strings.HasPrefix(cmd, "rollback:"):
 		b.doRollback(ctx, v, strings.TrimPrefix(cmd, "rollback:"))
+
+	case strings.HasPrefix(cmd, "test_egress:"):
+		b.doTestEgress(ctx, v, strings.TrimPrefix(cmd, "test_egress:"))
 
 	case strings.HasPrefix(cmd, "switch:"):
 		name := strings.TrimPrefix(cmd, "switch:")
@@ -614,24 +610,53 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 		if e.Current {
 			mark = "●"
 		}
-		fmt.Fprintf(&sb, "%s <b>%s</b>  <i>%s</i>\n", mark, html.EscapeString(e.Name), e.Type)
-		if e.Addr != "" {
-			fmt.Fprintf(&sb, "   <code>%s</code>\n", html.EscapeString(e.Addr))
+		disp := e.Display
+		if disp == "" {
+			disp = e.Name
+		}
+		fmt.Fprintf(&sb, "%s <b>%s</b>  <i>%s</i>\n", mark, html.EscapeString(disp), e.Type)
+		if e.Server != "" {
+			fmt.Fprintf(&sb, "   <code>%s</code>\n", html.EscapeString(e.Server))
 		}
 
+		short := truncateText(disp, 12)
+		row := []btn{{"🧪 测 " + short, "test_egress:" + e.Name}}
 		if !e.Current {
-			row := []btn{{"切到 " + truncateText(e.Name, 12), "switch:" + e.Name}}
-			if e.Name != "DIRECT" {
-				row = append(row, btn{"删除", "del_egress:" + e.Name})
-			}
-			rows = append(rows, row)
+			row = append([]btn{{"切到 " + short, "switch:" + e.Name}}, row...)
 		}
+		if e.Name != "DIRECT" {
+			row = append(row, btn{"🗑", "del_egress:" + e.Name})
+		}
+		rows = append(rows, row)
 	}
-	sb.WriteString("\n<i>● 为当前使用中的出口</i>")
+	sb.WriteString("\n<i>● 为当前使用中的出口。删除当前出口会自动回落 DIRECT。</i>")
 
 	rows = append(rows, []btn{{"➕ 添加出口", "ask_egress_add"}})
 	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+// doTestEgress 端到端测试出口连通性。
+func (b *Bot) doTestEgress(ctx context.Context, v view, name string) {
+	b.render(ctx, v, "🧪 正在测试出口 <code>"+html.EscapeString(name)+"</code> …\n\n<i>经该出口真实访问外网并校验响应。</i>", "")
+	d, err := b.Manager.TestEgress(name)
+	if err != nil {
+		b.render(ctx, v, fmt.Sprintf(
+			"❌ <b>出口不通</b> · <code>%s</code>\n\n<code>%s</code>",
+			html.EscapeString(name), html.EscapeString(err.Error())),
+			inlineKeyboard(
+				[]btn{{"🔁 再测一次", "test_egress:" + name}},
+				[]btn{{"« 返回出口", "egress"}},
+			))
+		return
+	}
+	b.render(ctx, v, fmt.Sprintf(
+		"✅ <b>出口连通</b> · <code>%s</code>\n\n端到端耗时 <b>%dms</b>",
+		html.EscapeString(name), d.Milliseconds()),
+		inlineKeyboard(
+			[]btn{{"🔁 再测一次", "test_egress:" + name}},
+			[]btn{{"« 返回出口", "egress"}},
+		))
 }
 
 func (b *Bot) showRules(ctx context.Context, v view) {
@@ -681,6 +706,41 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 	}
 	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+// askRuleAdd 提示添加规则，动态列出可用出口名，支持分流到不同出口。
+func (b *Bot) askRuleAdd(ctx context.Context, v view) {
+	var sb strings.Builder
+	sb.WriteString("➕ <b>添加分流规则</b>\n\n")
+	sb.WriteString("格式：<code>类型,值,动作</code>\n\n")
+	sb.WriteString("<b>动作</b>：<code>direct</code>（本机直出）· ")
+	sb.WriteString("<code>block</code>（拦截）· <code>proxy:出口名</code>\n\n")
+
+	names := b.Manager.SortedEgressNames()
+	var proxies []string
+	for _, n := range names {
+		if n != "DIRECT" {
+			proxies = append(proxies, n)
+		}
+	}
+	if len(proxies) > 0 {
+		sb.WriteString("<b>可用出口</b>：")
+		for i, n := range proxies {
+			if i > 0 {
+				sb.WriteString(" · ")
+			}
+			fmt.Fprintf(&sb, "<code>%s</code>", html.EscapeString(n))
+		}
+		sb.WriteString("\n\n")
+		fmt.Fprintf(&sb, "示例：\n<code>DOMAIN-SUFFIX,openai.com,proxy:%s</code>\n", html.EscapeString(proxies[0]))
+	} else {
+		sb.WriteString("示例：\n<code>DOMAIN-SUFFIX,openai.com,proxy:出口名</code>\n")
+	}
+	sb.WriteString("<code>DOMAIN-SUFFIX,example.cn,direct</code>\n")
+	sb.WriteString("<code>DOMAIN-KEYWORD,ads,block</code>\n\n")
+	sb.WriteString("新规则会插入到最前面，优先匹配；不同域名可分流到不同出口。")
+
+	b.ask(ctx, v, "rule_add", sb.String())
 }
 
 // showRuleDelMenu 列出可删除的自定义规则，每条一个按钮，按钮上带规则内容。

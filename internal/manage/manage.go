@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,9 +111,14 @@ type Status struct {
 
 // EgressStatus 描述一个出口。
 type EgressStatus struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Addr    string `json:"addr,omitempty"`
+	Name string `json:"name"`
+	// Type 为节点真实协议（ss/vless/...），direct 出口为 "direct"
+	Type string `json:"type"`
+	Addr string `json:"addr,omitempty"`
+	// Display 为展示名（节点原始备注名，可含 emoji/中文）
+	Display string `json:"display"`
+	// Server 为节点服务器 host:port（仅代理出口）
+	Server  string `json:"server,omitempty"`
 	Current bool   `json:"current"`
 }
 
@@ -129,8 +135,14 @@ func (m *Manager) Status(version string) Status {
 	cur := strings.TrimPrefix(cfg.Final, "proxy:")
 	var es []EgressStatus
 	for _, e := range cfg.Egress {
+		proto := e.Proto
+		if proto == "" {
+			proto = e.Type
+		}
 		es = append(es, EgressStatus{
-			Name: e.Name, Type: e.Type, Addr: e.Addr,
+			Name: e.Name, Type: proto, Addr: e.Addr,
+			Display: displayOf(e),
+			Server:  e.Server,
 			Current: strings.EqualFold(e.Name, cur),
 		})
 	}
@@ -171,10 +183,9 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 		name = fmt.Sprintf("node%d", time.Now().Unix()%10000)
 	}
 
-	// mihomo 只在安装时填了节点才会被装上；缺失时给出明确指引，
-	// 而不是让 systemd 报一句看不懂的 exec 失败。
-	if _, err := os.Stat("/usr/local/bin/mihomo"); err != nil {
-		return "", fmt.Errorf("服务器未安装 mihomo 出口协议栈。\n请重跑安装脚本并在询问时粘贴节点链接，脚本会自动安装")
+	// mihomo 缺失时运行期自动安装（安装脚本只在填了节点时才装）。
+	if err := ensureMihomo(); err != nil {
+		return "", fmt.Errorf("安装 mihomo 出口协议栈失败: %w", err)
 	}
 
 	m.mu.Lock()
@@ -230,12 +241,54 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 
 	m.Cfg.Egress = append(m.Cfg.Egress, config.EgressConfig{
 		Name: name, Type: "socks5",
-		Addr: addr,
+		Addr:        addr,
+		DisplayName: strings.TrimSpace(n.Name),
+		Proto:       n.Type,
+		Server:      fmt.Sprintf("%s:%d", n.Server, n.Port),
 	})
 	if err := m.saveAndReloadLocked(); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("已添加出口 %s（%s），联通性验证通过", name, n.Redacted()), nil
+	return fmt.Sprintf("已添加出口 %s（%s），联通性验证通过", displayOf(m.Cfg.Egress[len(m.Cfg.Egress)-1]), n.Redacted()), nil
+}
+
+// displayOf 返回出口的展示名：优先节点原始备注名。
+func displayOf(e config.EgressConfig) string {
+	if e.DisplayName != "" {
+		return e.DisplayName
+	}
+	return e.Name
+}
+
+// ensureMihomo 确保 mihomo 二进制存在；缺失时从官方发布下载安装。
+// 写 /usr/local 在沙箱内只读，走 systemd-run 由 PID 1 在沙箱外完成。
+func ensureMihomo() error {
+	if _, err := os.Stat("/usr/local/bin/mihomo"); err == nil {
+		return nil
+	}
+	arch := runtime.GOARCH
+	if arch != "amd64" && arch != "arm64" {
+		return fmt.Errorf("不支持的架构 %s", arch)
+	}
+	ver := "v1.19.29"
+	url := fmt.Sprintf(
+		"https://github.com/MetaCubeX/mihomo/releases/download/%s/mihomo-linux-%s-%s.gz",
+		ver, arch, ver)
+	script := fmt.Sprintf(
+		"curl -fsSL --max-time 180 %q | gunzip > /usr/local/bin/mihomo.new && "+
+			"chmod 755 /usr/local/bin/mihomo.new && "+
+			"/usr/local/bin/mihomo.new -v >/dev/null 2>&1 && "+
+			"mv -f /usr/local/bin/mihomo.new /usr/local/bin/mihomo", url)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemd-run",
+		"--quiet", "--wait", "--collect",
+		"--property=Type=oneshot",
+		"/bin/sh", "-c", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("下载安装失败: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // localPort 提取 127.0.0.1:N 形式地址的端口。
@@ -317,9 +370,6 @@ func (m *Manager) RemoveEgress(name string) error {
 	if idx < 0 {
 		return fmt.Errorf("出口 %q 不存在", name)
 	}
-	if strings.TrimPrefix(m.Cfg.Final, "proxy:") == name {
-		return fmt.Errorf("出口 %q 正在使用中，请先切换到其它出口", name)
-	}
 
 	_ = systemctl("disable", "--now", "mihomo-5gpn@"+name+".service")
 	_ = os.RemoveAll(egressDir + "/" + name)
@@ -327,7 +377,58 @@ func (m *Manager) RemoveEgress(name string) error {
 	_ = os.RemoveAll("/etc/mihomo-5gpn/" + name)
 
 	m.Cfg.Egress = append(m.Cfg.Egress[:idx], m.Cfg.Egress[idx+1:]...)
+
+	// 删除的是当前出口：自动回落 DIRECT，绝不留下悬空引用
+	if strings.TrimPrefix(m.Cfg.Final, "proxy:") == name {
+		m.Cfg.Final = "direct"
+	}
+	// 清理引用该出口的自定义规则
+	var kept []string
+	for _, r := range m.Cfg.Rules {
+		if strings.HasSuffix(strings.TrimSpace(r), ",proxy:"+name) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	m.Cfg.Rules = kept
+
 	return m.saveAndReloadLocked()
+}
+
+// TestEgress 端到端测试一个出口，返回耗时。
+func (m *Manager) TestEgress(name string) (time.Duration, error) {
+	m.mu.RLock()
+	addr := ""
+	found := false
+	for _, e := range m.Cfg.Egress {
+		if e.Name == name {
+			found = true
+			addr = e.Addr
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if !found && name != "DIRECT" {
+		return 0, fmt.Errorf("出口 %q 不存在", name)
+	}
+
+	start := time.Now()
+	if addr == "" {
+		// DIRECT：本机直接连测试目标
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		var d net.Dialer
+		c, err := d.DialContext(ctx, "tcp", "cp.cloudflare.com:80")
+		if err != nil {
+			return 0, err
+		}
+		c.Close()
+		return time.Since(start), nil
+	}
+	if err := verifyEgress(addr, 8*time.Second); err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
 }
 
 // SwitchEgress 切换默认出口。
