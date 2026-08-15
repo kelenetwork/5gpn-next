@@ -41,6 +41,10 @@ type LocationController interface {
 	ClearLocation()
 	Rewrites() uint64
 	CAFingerprint() string
+	// SetEnabled 开关功能；EnsureCA 在首次启用时生成根证书。
+	SetEnabled(bool)
+	EnsureCA() error
+	HasCA() bool
 }
 
 // StatsSource 提供运行时计数。
@@ -633,7 +637,9 @@ func (m *Manager) ensureDomesticRules(ctx context.Context) error {
 
 // LocationStatus 是定位修改状态快照。
 type LocationStatus struct {
-	// Available 表示功能已在配置中启用（网关侧已就绪）
+	// Supported 表示网关具备该能力（DoT 入口已启用）
+	Supported bool `json:"supported"`
+	// Available 表示功能开关处于开启状态
 	Available bool `json:"available"`
 	// Active 表示已设置坐标、正在改写
 	Active bool    `json:"active"`
@@ -652,6 +658,7 @@ func (m *Manager) LocationState() LocationStatus {
 	}
 	lat, lon, ok := m.Location.Location()
 	return LocationStatus{
+		Supported:     true,
 		Available:     m.Location.Enabled(),
 		Active:        ok,
 		Lat:           lat,
@@ -659,6 +666,42 @@ func (m *Manager) LocationState() LocationStatus {
 		Rewrites:      m.Location.Rewrites(),
 		CAFingerprint: m.Location.CAFingerprint(),
 	}
+}
+
+// SetLocationEnabled 开关定位修改。
+//
+// 首次开启会生成根 CA（一次性，10 年有效），无需重启服务；
+// 但描述文件需要重新安装才能把根证书带给手机。
+func (m *Manager) SetLocationEnabled(on bool) (string, error) {
+	if m.Location == nil {
+		return "", fmt.Errorf("定位修改不可用（需启用 android.enabled 的 DoT 入口）")
+	}
+	if m.Location.Enabled() == on {
+		if on {
+			return "定位修改已是开启状态", nil
+		}
+		return "定位修改已是关闭状态", nil
+	}
+
+	if on {
+		// 先确保根证书就绪，否则会出现“显示已开启但根本不能改写”的假成功
+		if err := m.Location.EnsureCA(); err != nil {
+			return "", fmt.Errorf("生成根证书失败: %w", err)
+		}
+	}
+	m.Location.SetEnabled(on)
+
+	m.mu.Lock()
+	m.Cfg.Location.Enabled = on
+	err := m.saveAndReloadLocked()
+	m.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	if !on {
+		return "定位修改已关闭（流量恢复完全透传）", nil
+	}
+	return "定位修改已开启，请重新安装描述文件以安装根证书", nil
 }
 
 // SetLocation 设置目标坐标并持久化。

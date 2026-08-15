@@ -17,9 +17,12 @@ import (
 // 生命周期：功能关闭时 cmd 层直接注入 nil，连接路径上零开销；
 // 开启但未设坐标时 Active() 为 false，同样全部透传。
 type Spoofer struct {
-	ca *CA
+	// caDir 为 CA 存放目录；ca 延迟到首次启用时才生成，
+	// 这样未启用的部署不会凭空多出一张根证书。
+	caDir string
 
 	mu      sync.RWMutex
+	ca      *CA
 	enabled bool
 	lat     float64
 	lon     float64
@@ -28,8 +31,33 @@ type Spoofer struct {
 	rewrites uint64
 }
 
-// New 构造 Spoofer。
-func New(ca *CA) *Spoofer { return &Spoofer{ca: ca} }
+// New 构造 Spoofer；CA 延迟生成（见 EnsureCA）。
+func New(caDir string) *Spoofer { return &Spoofer{caDir: caDir} }
+
+// EnsureCA 载入或生成根 CA。首次启用定位功能时调用。
+//
+// CA 一旦生成即长期复用（10 年有效），重启不会变化，
+// 因此已安装的描述文件不会因为开关功能而失效。
+func (s *Spoofer) EnsureCA() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ca != nil {
+		return nil
+	}
+	ca, err := LoadOrCreateCA(s.caDir)
+	if err != nil {
+		return err
+	}
+	s.ca = ca
+	return nil
+}
+
+// HasCA 报告根证书是否已就绪（决定描述文件是否内嵌证书）。
+func (s *Spoofer) HasCA() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ca != nil
+}
 
 // SetEnabled 开关功能。
 func (s *Spoofer) SetEnabled(v bool) {
@@ -77,21 +105,35 @@ func (s *Spoofer) Rewrites() uint64 {
 	return s.rewrites
 }
 
-// Active 报告是否应该拦截：必须同时启用且已设坐标。
+// Active 报告是否应该拦截：必须同时启用、已设坐标且 CA 就绪。
 func (s *Spoofer) Active() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.enabled && s.hasLoc
+	return s.enabled && s.hasLoc && s.ca != nil
 }
 
 // Handles 报告主机是否在中间人白名单内。
 func (s *Spoofer) Handles(host string) bool { return Allowed(host) }
 
-// CACertDER 返回根证书 DER（写入描述文件）。
-func (s *Spoofer) CACertDER() []byte { return s.ca.CertDER() }
+// CACertDER 返回根证书 DER（写入描述文件）；CA 未就绪时返回 nil。
+func (s *Spoofer) CACertDER() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.ca == nil {
+		return nil
+	}
+	return s.ca.CertDER()
+}
 
 // CAFingerprint 返回根证书指纹，便于用户核对。
-func (s *Spoofer) CAFingerprint() string { return s.ca.Fingerprint() }
+func (s *Spoofer) CAFingerprint() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.ca == nil {
+		return ""
+	}
+	return s.ca.Fingerprint()
+}
 
 // mitmTimeout 是单次定位请求的处理上限。
 //
@@ -111,7 +153,13 @@ func (s *Spoofer) Serve(client, upstream net.Conn, host string) error {
 	if !ok {
 		return fmt.Errorf("未设置目标坐标")
 	}
-	leaf, err := s.ca.LeafFor(host)
+	s.mu.RLock()
+	ca := s.ca
+	s.mu.RUnlock()
+	if ca == nil {
+		return fmt.Errorf("根证书未就绪")
+	}
+	leaf, err := ca.LeafFor(host)
 	if err != nil {
 		return err
 	}

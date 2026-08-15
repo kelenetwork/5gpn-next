@@ -3,6 +3,7 @@ package mitm
 import (
 	"encoding/binary"
 	"math"
+	"os"
 	"testing"
 	"time"
 )
@@ -260,11 +261,10 @@ func TestRewriteReportsNoCoords(t *testing.T) {
 }
 
 func TestSpooferGating(t *testing.T) {
-	ca, err := LoadOrCreateCA(t.TempDir())
-	if err != nil {
+	s := New(t.TempDir())
+	if err := s.EnsureCA(); err != nil {
 		t.Fatal(err)
 	}
-	s := New(ca)
 
 	if s.Active() {
 		t.Fatal("must be inactive before enabling")
@@ -290,5 +290,57 @@ func TestSpooferGating(t *testing.T) {
 	_ = s.SetLocation(39.9042, 116.4074)
 	if s.Active() {
 		t.Fatal("disabled must never be active")
+	}
+}
+
+// CA 延迟生成：未启用的部署不应凭空多出一张根证书，
+// 也绝不能在没有证书时声称自己 Active。
+func TestSpooferLazyCA(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+
+	if s.HasCA() {
+		t.Fatal("CA must not exist before first enable")
+	}
+	if s.CACertDER() != nil || s.CAFingerprint() != "" {
+		t.Fatal("no CA yet: DER/fingerprint must be empty")
+	}
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) != 0 {
+		t.Fatalf("CA dir should stay empty, got %d entries", len(entries))
+	}
+
+	// 没有 CA 时即使开启+设坐标也不能生效
+	s.SetEnabled(true)
+	if err := s.SetLocation(39.9042, 116.4074); err != nil {
+		t.Fatal(err)
+	}
+	if s.Active() {
+		t.Fatal("must not be active without a CA")
+	}
+
+	if err := s.EnsureCA(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.HasCA() || !s.Active() {
+		t.Fatal("should become active once CA is ready")
+	}
+	fp := s.CAFingerprint()
+	if fp == "" {
+		t.Fatal("fingerprint must be available after EnsureCA")
+	}
+
+	// 重复调用幂等：开关多次不得更换证书，否则已装描述文件会失效
+	if err := s.EnsureCA(); err != nil {
+		t.Fatal(err)
+	}
+	if s.CAFingerprint() != fp {
+		t.Fatal("EnsureCA must be idempotent")
+	}
+
+	// 关闭后重新打开，证书仍需保持不变
+	s.SetEnabled(false)
+	s.SetEnabled(true)
+	if s.CAFingerprint() != fp {
+		t.Fatal("toggling must not rotate the CA")
 	}
 }

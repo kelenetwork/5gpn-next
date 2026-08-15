@@ -367,6 +367,10 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showRules(ctx, v)
 	case cmd == "location":
 		b.showLocation(ctx, v)
+	case cmd == "loc_on":
+		b.doLocationToggle(ctx, v, true)
+	case cmd == "loc_off":
+		b.doLocationToggle(ctx, v, false)
 	case cmd == "loc_clear":
 		if err := b.Manager.ClearLocation(); err != nil {
 			b.render(ctx, v, errBox("恢复失败", err), backTo("location"))
@@ -746,6 +750,41 @@ func parseLatLon(s string) (float64, float64, error) {
 	return lat, lon, nil
 }
 
+// doLocationToggle 开关定位修改。首次开启会生成根 CA。
+func (b *Bot) doLocationToggle(ctx context.Context, v view, on bool) {
+	msg, err := b.Manager.SetLocationEnabled(on)
+	if err != nil {
+		b.render(ctx, v, errBox("操作失败", err), backTo("location"))
+		return
+	}
+	if !on {
+		b.render(ctx, v, "✅ "+html.EscapeString(msg), inlineKeyboard(
+			[]btn{{"📍 返回定位页", "location"}},
+			[]btn{{"« 返回主菜单", "menu"}},
+		))
+		return
+	}
+
+	st := b.Manager.LocationState()
+	var sb strings.Builder
+	sb.WriteString("✅ <b>定位修改已开启</b>\n\n")
+	sb.WriteString("<b>接下来请在手机上完成：</b>\n")
+	sb.WriteString("1️⃣ 删除旧的 5gpn 描述文件\n")
+	sb.WriteString("2️⃣ 点下方按钮重新获取并安装\n")
+	sb.WriteString("3️⃣ 设置 → 通用 → 关于本机 → 证书信任设置\n")
+	sb.WriteString("　　开启对「5gpn-NEXT」的<b>完全信任</b>\n")
+	sb.WriteString("4️⃣ 回来设置目标坐标\n\n")
+	if st.CAFingerprint != "" {
+		fmt.Fprintf(&sb, "<i>根证书指纹 <code>%s</code></i>",
+			html.EscapeString(truncateText(st.CAFingerprint, 32)))
+	}
+	b.render(ctx, v, sb.String(), inlineKeyboard(
+		[]btn{{"📱 获取描述文件", "ios_dns_profile"}},
+		[]btn{{"📍 设置定位", "ask_loc_set"}},
+		[]btn{{"« 返回主菜单", "menu"}},
+	))
+}
+
 // showLocation 展示定位修改状态。
 func (b *Bot) showLocation(ctx context.Context, v view) {
 	st := b.Manager.LocationState()
@@ -754,14 +793,26 @@ func (b *Bot) showLocation(ctx context.Context, v view) {
 	sb.WriteString("📍 <b>修改定位</b>\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 
-	if !st.Available {
-		sb.WriteString("状态　<b>未启用</b>\n\n")
-		sb.WriteString("<blockquote>该功能需要手机信任网关签发的根证书，因此默认关闭。\n\n")
-		sb.WriteString("开启方法：编辑 <code>/etc/5gpn-next/config.json</code>，\n")
-		sb.WriteString("把 <code>location.enabled</code> 设为 <code>true</code>，\n")
-		sb.WriteString("然后 <code>systemctl restart 5gpn-next</code>。\n\n")
-		sb.WriteString("启用后需重新安装 iOS 描述文件（含根证书）。</blockquote>")
+	if !st.Supported {
+		sb.WriteString("状态　<b>不可用</b>\n\n")
+		sb.WriteString("<blockquote>定位修改依赖 DoT 入口。\n")
+		sb.WriteString("请先启用 <code>android.enabled</code> 并重启服务。</blockquote>")
 		b.render(ctx, v, sb.String(), backTo("menu"))
+		return
+	}
+
+	if !st.Available {
+		sb.WriteString("状态　<b>已关闭</b>\n\n")
+		sb.WriteString("<blockquote>开启后可修改 iOS 的<b>网络定位</b>（WiFi/基站），\n")
+		sb.WriteString("不影响 GPS 硬件定位。\n\n")
+		sb.WriteString("⚠️ 需要手机信任网关根证书：\n")
+		sb.WriteString("网关只对 <code>gs-loc.apple.com</code> 解密，\n")
+		sb.WriteString("其余流量一律透传，白名单硬编码不可扩展。\n\n")
+		sb.WriteString("开启后需重新安装描述文件以安装根证书。</blockquote>")
+		b.render(ctx, v, sb.String(), inlineKeyboard(
+			[]btn{{"🟢 开启定位修改", "loc_on"}},
+			[]btn{{"« 返回主菜单", "menu"}},
+		))
 		return
 	}
 
@@ -787,7 +838,11 @@ func (b *Bot) showLocation(ctx context.Context, v view) {
 	if st.Active {
 		rows = append(rows, []btn{{"♻️ 恢复真实定位", "loc_clear"}})
 	}
-	rows = append(rows, []btn{{"🔄 刷新", "location"}, {"« 返回主菜单", "menu"}})
+	rows = append(rows,
+		[]btn{{"📱 重新获取描述文件", "ios_dns_profile"}},
+		[]btn{{"🔴 关闭定位修改", "loc_off"}},
+		[]btn{{"🔄 刷新", "location"}, {"« 返回主菜单", "menu"}},
+	)
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 

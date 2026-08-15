@@ -60,9 +60,11 @@ func (c *dnsCounters) record(action string) {
 // 删除 Relay 后这里不再需要处理 CONNECT，因此可以直接用标准
 // http.ServeMux 之外的简单分发（描述文件路径含随机串，不适合 mux 前缀匹配）。
 type httpService struct {
-	// ProfilePath / ProfileBytes 是蜂窝 DNS 描述文件下载端点
+	// ProfilePath 是蜂窝 DNS 描述文件下载端点；ProfileBytes 现场生成，
+	// 这样在 Bot 里开关定位修改后，重新下载即可拿到含/不含根证书的版本，
+	// 无需重启服务。
 	ProfilePath  string
-	ProfileBytes []byte
+	ProfileBytes func() ([]byte, error)
 
 	// Panel 是内网 Web 面板处理器（可为 nil）
 	Panel http.Handler
@@ -76,10 +78,16 @@ type httpService struct {
 func (h *httpService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 描述文件下载：iOS 下载时不带任何鉴权头，
 	// 路径含随机串本身即能力凭证。
-	if h.ProfilePath != "" && r.Method == http.MethodGet && r.URL.Path == h.ProfilePath {
+	if h.ProfilePath != "" && h.ProfileBytes != nil &&
+		r.Method == http.MethodGet && r.URL.Path == h.ProfilePath {
+		b, err := h.ProfileBytes()
+		if err != nil {
+			http.Error(w, "profile unavailable", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/x-apple-aspen-config")
 		w.Header().Set("Content-Disposition", `attachment; filename="5gpn-next.mobileconfig"`)
-		w.Write(h.ProfileBytes)
+		w.Write(b)
 		return
 	}
 

@@ -281,42 +281,42 @@ func cmdRun(args []string) error {
 		}
 	}
 
-	// 定位修改：默认关闭。关闭时不生成 CA、不下发证书、不拦截任何流量。
-	var spoofer *mitm.Spoofer
+	// 定位修改：Spoofer 总是创建（便于 Bot 随时开关），但 CA 延迟到
+	// 首次启用时才生成：未启用的部署不会凭空多出一张根证书，
+	// 也不下发证书、不拦截任何流量。
+	spoofer := mitm.New("/var/lib/5gpn-next/ca")
 	if a.cfg.Location.Enabled {
-		ca, err := mitm.LoadOrCreateCA("/var/lib/5gpn-next/ca")
-		if err != nil {
+		if err := spoofer.EnsureCA(); err != nil {
 			log.Printf("警告: 定位修改初始化失败: %v（功能不可用，其余正常）", err)
 		} else {
-			spoofer = mitm.New(ca)
 			spoofer.SetEnabled(true)
 			if a.cfg.Location.HasFix {
 				if err := spoofer.SetLocation(a.cfg.Location.Lat, a.cfg.Location.Lon); err != nil {
 					log.Printf("警告: 定位坐标无效: %v", err)
 				}
 			}
-			log.Printf("定位修改已启用，根证书指纹 %s", ca.Fingerprint())
+			log.Printf("定位修改已启用，根证书指纹 %s", spoofer.CAFingerprint())
 		}
 	}
 
 	// 蜂窝 DNS 描述文件：唯一的 iOS 接入方式。
 	// 沿用配置里原有的随机下载路径，保证已有安装链接不失效。
+	//
+	// 每次请求现场生成：在 Bot 里开启定位修改后，重新下载即含根证书，
+	// 无需重启服务。
 	profilePath := a.cfg.Relay.ProfilePath
-	var profBytes []byte
-	if profilePath != "" && a.cfg.Android.Enabled {
+	if !a.cfg.Android.Enabled {
+		profilePath = ""
+	}
+	buildProfile := func() ([]byte, error) {
 		o := profile.DefaultDNS(a.cfg.Relay.Host)
 		if a.cfg.Android.GatewayIP != "" {
 			o.ServerAddresses = []string{a.cfg.Android.GatewayIP}
 		}
-		if spoofer != nil {
+		if spoofer.HasCA() {
 			o.RootCADER = spoofer.CACertDER()
 		}
-		if b, err := o.Build(); err == nil {
-			profBytes = b
-		}
-	}
-	if profBytes == nil {
-		profilePath = ""
+		return o.Build()
 	}
 
 	// 运行态：策略引擎与出口注册表，热重载时原子替换指针。
@@ -361,13 +361,7 @@ func cmdRun(args []string) error {
 
 	// 描述文件生成器：供 Bot 直接以文件形式下发
 	if a.cfg.Android.Enabled {
-		mgr.DNSProfileBytes = func() ([]byte, error) {
-			o := profile.DefaultDNS(a.cfg.Relay.Host)
-			if a.cfg.Android.GatewayIP != "" {
-				o.ServerAddresses = []string{a.cfg.Android.GatewayIP}
-			}
-			return o.Build()
-		}
+		mgr.DNSProfileBytes = buildProfile
 	}
 	mgr.AndroidInfo = func() manage.AndroidGuide {
 		g := manage.AndroidGuide{
@@ -588,7 +582,7 @@ func cmdRun(args []string) error {
 	// 删除 Relay 后不再需要处理 CONNECT，也不再有 PvD 端点。
 	root := &httpService{
 		ProfilePath:  profilePath,
-		ProfileBytes: profBytes,
+		ProfileBytes: buildProfile,
 		Panel:        panelHandler,
 		Stats:        snapshot,
 		Runtime:      rt,
