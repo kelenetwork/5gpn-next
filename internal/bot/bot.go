@@ -365,6 +365,28 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showEgress(ctx, v)
 	case cmd == "rules":
 		b.showRules(ctx, v)
+	case cmd == "adblock":
+		b.showAdBlock(ctx, v)
+	case cmd == "adblock_on":
+		b.doAdBlockToggle(ctx, v, true)
+	case cmd == "adblock_off":
+		b.doAdBlockToggle(ctx, v, false)
+	case cmd == "ask_ad_allow":
+		b.ask(ctx, v, "ad_allow",
+			"➕ <b>添加广告白名单</b>\n\n"+
+				"某个 App 被误杀（白屏、加载不出来）时，把它的域名加进来。\n\n"+
+				"直接发域名即可，例如：<code>example.com</code>\n"+
+				"会连同子域名一起放行。")
+	case cmd == "ad_allow_list":
+		b.showAdAllowlist(ctx, v)
+	case strings.HasPrefix(cmd, "ad_allow_del:"):
+		if idx, err := strconv.Atoi(strings.TrimPrefix(cmd, "ad_allow_del:")); err == nil {
+			if err := b.Manager.RemoveAdAllow(idx); err != nil {
+				b.render(ctx, v, errBox("移除失败", err), backTo("ad_allow_list"))
+				return
+			}
+		}
+		b.showAdAllowlist(ctx, v)
 	case cmd == "client":
 		b.showClient(ctx, v)
 	case cmd == "panel":
@@ -470,6 +492,13 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 		}
 		b.showRules(ctx, v)
 
+	case "ad_allow":
+		if err := b.Manager.AllowAd(text); err != nil {
+			b.render(ctx, v, errBox("添加失败", err), backTo("adblock"))
+			return
+		}
+		b.showAdBlock(ctx, v)
+
 	case "probe":
 		target := strings.TrimSpace(text)
 		b.render(ctx, v, "🩺 正在诊断 <code>"+html.EscapeString(target)+"</code> …", "")
@@ -514,8 +543,9 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 	b.render(ctx, v, sb.String(), inlineKeyboard(
 		[]btn{{"📊 运行状态", "status"}, {"📈 流量统计", "traffic"}},
 		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
-		[]btn{{"🩺 连通诊断", "ask_probe"}, {"📱 客户端接入", "client"}},
-		[]btn{{"🖥 内网面板", "panel"}, {"🚀 版本更新", "update"}},
+		[]btn{{"🛡 广告拦截", "adblock"}, {"🩺 连通诊断", "ask_probe"}},
+		[]btn{{"📱 客户端接入", "client"}, {"🖥 内网面板", "panel"}},
+		[]btn{{"🚀 版本更新", "update"}},
 	))
 }
 
@@ -667,6 +697,96 @@ func (b *Bot) doTestEgress(ctx context.Context, v view, name string) {
 			[]btn{{"🔁 再测一次", "test_egress:" + name}},
 			[]btn{{"« 返回出口", "egress"}},
 		))
+}
+
+// showAdBlock 展示广告拦截状态与开关。
+func (b *Bot) showAdBlock(ctx context.Context, v view) {
+	st := b.Manager.Status(b.Version)
+	ad := st.AdBlock
+
+	var sb strings.Builder
+	sb.WriteString("🛡 <b>广告拦截</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+
+	if ad.Enabled {
+		if ad.Domains > 0 {
+			fmt.Fprintf(&sb, "状态　<b>已开启</b>\n规则　<b>%d</b> 条拦截域名\n", ad.Domains)
+		} else {
+			sb.WriteString("状态　<b>已开启</b>\n⚠️ 规则集尚未载入（下载中或下载失败）\n")
+		}
+	} else {
+		sb.WriteString("状态　<b>已关闭</b>\n")
+	}
+	fmt.Fprintf(&sb, "白名单　<b>%d</b> 条\n\n", ad.Allowlist)
+
+	sb.WriteString("<blockquote>在网关侧拦截，全设备生效、无需安装 App。\n")
+	sb.WriteString("Relay 模式直接拒绝连接，DNS 模式返回 NXDOMAIN。\n")
+	sb.WriteString("自定义分流规则优先级高于拦截，可随时覆盖。</blockquote>\n\n")
+	sb.WriteString("<i>若某 App 白屏/加载不出，把其域名加入白名单即可救急。</i>")
+
+	rows := [][]btn{}
+	if ad.Enabled {
+		rows = append(rows, []btn{{"🔴 关闭拦截", "adblock_off"}})
+	} else {
+		rows = append(rows, []btn{{"🟢 开启拦截", "adblock_on"}})
+	}
+	rows = append(rows,
+		[]btn{{"➕ 加白名单", "ask_ad_allow"}, {"📋 白名单", "ad_allow_list"}},
+		[]btn{{"« 返回主菜单", "menu"}},
+	)
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+// doAdBlockToggle 切换广告拦截。首次开启需下载约 2MB 规则集。
+func (b *Bot) doAdBlockToggle(ctx context.Context, v view, on bool) {
+	if on {
+		b.render(ctx, v, "🛡 正在开启广告拦截…\n\n<i>首次需下载规则集（约 2MB / 10 万条），请稍候。</i>", "")
+	}
+	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
+	msg, err := b.Manager.SetAdBlock(cctx, on)
+	cancel()
+	if err != nil {
+		b.render(ctx, v, errBox("操作失败", err), backTo("adblock"))
+		return
+	}
+	b.render(ctx, v, "✅ "+html.EscapeString(msg), inlineKeyboard(
+		[]btn{{"🛡 返回广告拦截", "adblock"}},
+		[]btn{{"« 返回主菜单", "menu"}},
+	))
+}
+
+// showAdAllowlist 列出白名单，每条一个删除按钮。
+func (b *Bot) showAdAllowlist(ctx context.Context, v view) {
+	list := b.Manager.AdAllowlist()
+
+	var sb strings.Builder
+	sb.WriteString("📋 <b>广告白名单</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	if len(list) == 0 {
+		sb.WriteString("<blockquote>暂无白名单。\n某个 App 被误杀时，把它的域名加进来即可放行。</blockquote>")
+	} else {
+		sb.WriteString("<blockquote>")
+		for i, d := range list {
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "%d. <code>%s</code>", i+1, html.EscapeString(d))
+		}
+		sb.WriteString("</blockquote>")
+	}
+
+	rows := [][]btn{}
+	for i, d := range list {
+		if i >= 10 {
+			break
+		}
+		rows = append(rows, []btn{{"🗑 " + truncateText(d, 24), fmt.Sprintf("ad_allow_del:%d", i)}})
+	}
+	rows = append(rows,
+		[]btn{{"➕ 加白名单", "ask_ad_allow"}},
+		[]btn{{"« 返回广告拦截", "adblock"}},
+	)
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
 func (b *Bot) showRules(ctx context.Context, v view) {

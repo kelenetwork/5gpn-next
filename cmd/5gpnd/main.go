@@ -178,7 +178,7 @@ func loadRuleSets(cfg *config.Config, eng *policy.Engine) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	for _, rs := range cfg.RuleSets {
+	for _, rs := range cfg.EffectiveRuleSets() {
 		src := rs.Path
 		if src == "" {
 			// 缓存优先：有缓存立即用，服务秒级起监听；
@@ -224,9 +224,19 @@ func loadRuleSets(cfg *config.Config, eng *policy.Engine) error {
 //
 // 规则格式: TYPE,VALUE,ACTION   例如 DOMAIN-SUFFIX,openai.com,proxy:us-1
 func applyRules(cfg *config.Config, eng *policy.Engine) error {
-	// 编译顺序：内置前置（私网保护）→ 用户规则 → 内置兜底（国内直连）。
+	// 编译顺序：
+	//   内置前置（私网保护）
+	//   → 用户规则（最高优先，可覆盖广告拦截）
+	//   → 广告拦截（白名单 direct 在前、RULE-SET block 在后）
+	//   → 内置兜底（国内直连）
+	//
+	// 广告规则必须排在国内直连之前：国内 App 的广告域名大多也在
+	// cn-domain 名单里，若放到后面会先命中 direct 而完全拦不到。
 	// 内置规则不在配置文件里，Bot/面板改不到也删不掉。
-	all := append(append(config.BuiltinPre(), cfg.Rules...), config.BuiltinPost()...)
+	all := append([]string(nil), config.BuiltinPre()...)
+	all = append(all, cfg.Rules...)
+	all = append(all, cfg.BuiltinAdBlock()...)
+	all = append(all, config.BuiltinPost()...)
 	for i, line := range all {
 		parts := strings.Split(strings.TrimSpace(line), ",")
 		if len(parts) < 3 {

@@ -145,6 +145,20 @@ func (e *Engine) Final() Decision {
 	return e.final
 }
 
+// DomainSetLen 返回指定域名规则集的条数；未注册时返回 0。
+//
+// 供状态展示使用：区分“开关已打开”与“规则真的载入了”，
+// 避免出现“显示已开启但实际一条没拦”的假成功。
+func (e *Engine) DomainSetLen(name string) int {
+	e.mu.RLock()
+	ds := e.domainSets[name]
+	e.mu.RUnlock()
+	if ds == nil {
+		return 0
+	}
+	return ds.Len()
+}
+
 // DomesticRulesReady 报告国内直连的两套强制规则是否都已有效载入。
 // 仅“注册了名字”不够，空规则集同样视为未就绪。
 func (e *Engine) DomesticRulesReady() bool {

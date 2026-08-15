@@ -36,6 +36,9 @@ type Config struct {
 	// 手机侧直连域名（写进描述文件 ExcludedDomains）
 	ExcludedDomains []string `json:"excluded_domains"`
 
+	// AdBlock 是广告/追踪拦截配置。
+	AdBlock AdBlockConfig `json:"ad_block"`
+
 	// PreferIPv4 让所有出口对 IPv6 字面量目标立即快速失败（0ms），
 	// 促使客户端 Happy Eyeballs 直接改用 IPv4。
 	//
@@ -134,6 +137,79 @@ type EgressConfig struct {
 	Proto string `json:"proto,omitempty"`
 	// Server 是节点服务器 host:port，仅用于展示。
 	Server string `json:"server,omitempty"`
+}
+
+// AdBlockConfig 控制广告拦截。
+//
+// 拦截在网关侧完成，全设备生效且无需安装任何 App：
+//   - Relay 模式：CONNECT 直接返回 403，App 秒失败不转圈
+//   - DNS 模式：返回 NXDOMAIN，更彻底
+type AdBlockConfig struct {
+	// Enabled 为 false 时完全不加载规则集，不占内存与带宽。
+	Enabled bool `json:"enabled"`
+
+	// URL 为空时使用 DefaultAdBlockURL。
+	URL string `json:"url,omitempty"`
+
+	// Allowlist 是白名单域名后缀（误杀时救急）。
+	//
+	// 注意：用户自定义规则本身就排在广告拦截之前，写一条
+	// DOMAIN-SUFFIX,xxx,direct 同样能放行；此字段只是更直观的入口。
+	Allowlist []string `json:"allowlist,omitempty"`
+}
+
+// DefaultAdBlockURL 是默认规则源（anti-AD，中文环境命中率最高）。
+const DefaultAdBlockURL = "https://anti-ad.net/domains.txt"
+
+// AdBlockRuleSetName 是广告规则集的内部名。
+const AdBlockRuleSetName = "ad-block"
+
+// AdBlockURLOrDefault 返回实际使用的规则源。
+func (c *Config) AdBlockURLOrDefault() string {
+	if c.AdBlock.URL != "" {
+		return c.AdBlock.URL
+	}
+	return DefaultAdBlockURL
+}
+
+// BuiltinAdBlock 返回广告拦截规则（含白名单）。
+//
+// 顺序：白名单 direct 必须在 RULE-SET block 之前，否则永远不会命中。
+func (c *Config) BuiltinAdBlock() []string {
+	if !c.AdBlock.Enabled {
+		return nil
+	}
+	out := make([]string, 0, len(c.AdBlock.Allowlist)+1)
+	for _, d := range c.AdBlock.Allowlist {
+		d = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(d), "."))
+		if d == "" || strings.ContainsAny(d, ",/ ") {
+			continue
+		}
+		out = append(out, "DOMAIN-SUFFIX,"+d+",direct")
+	}
+	return append(out, "RULE-SET,"+AdBlockRuleSetName+",block")
+}
+
+// EffectiveRuleSets 返回实际需要加载的规则集（含广告规则）。
+//
+// 广告规则集不写进配置文件的 rulesets 数组：它由 ad_block.enabled
+// 控制，关闭时应彻底不下载不占内存。
+func (c *Config) EffectiveRuleSets() []RuleSetConfig {
+	out := append([]RuleSetConfig(nil), c.RuleSets...)
+	if !c.AdBlock.Enabled {
+		return out
+	}
+	for _, rs := range out {
+		if rs.Name == AdBlockRuleSetName {
+			return out // 用户已显式配置，以其为准
+		}
+	}
+	return append(out, RuleSetConfig{
+		Name:          AdBlockRuleSetName,
+		Kind:          "domain",
+		URL:           c.AdBlockURLOrDefault(),
+		IntervalHours: 24,
+	})
 }
 
 // RuleSetConfig 是一个规则集来源。

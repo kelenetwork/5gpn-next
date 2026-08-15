@@ -113,6 +113,17 @@ type Status struct {
 	MemoryMB      float64          `json:"memory_mb"`
 	CertUntil     string           `json:"cert_until,omitempty"`
 	DomesticReady bool             `json:"domestic_ready"`
+	// AdBlock 是广告拦截状态
+	AdBlock AdBlockStatus `json:"ad_block"`
+}
+
+// AdBlockStatus 描述广告拦截当前状态。
+type AdBlockStatus struct {
+	Enabled bool `json:"enabled"`
+	// Domains 是已载入的拦截域名条数；0 表示规则集尚未就绪
+	Domains int `json:"domains"`
+	// Allowlist 是白名单条数
+	Allowlist int `json:"allowlist"`
 }
 
 // EgressStatus 描述一个出口。
@@ -172,6 +183,11 @@ func (m *Manager) Status(version string) Status {
 		Final:         effectiveFinal,
 		MemoryMB:      memoryMB(),
 		DomesticReady: eng.DomesticRulesReady(),
+		AdBlock: AdBlockStatus{
+			Enabled:   cfg.AdBlock.Enabled,
+			Domains:   eng.DomainSetLen(config.AdBlockRuleSetName),
+			Allowlist: len(cfg.AdBlock.Allowlist),
+		},
 	}
 	if m.Stats != nil {
 		st.Counters = m.Stats.Snapshot()
@@ -595,6 +611,92 @@ func (m *Manager) ensureDomesticRules(ctx context.Context) error {
 		return fmt.Errorf("cn-domain / geoip:cn 内容为空或解析失败")
 	}
 	return nil
+}
+
+// ---------- 广告拦截 ----------
+
+// SetAdBlock 开关广告拦截。
+//
+// 开启时先确保规则集已下载（首次约 2MB / 10 万条），
+// 避免“显示已开启但实际一条没拦”的假成功。
+func (m *Manager) SetAdBlock(ctx context.Context, on bool) (string, error) {
+	m.mu.Lock()
+	if m.Cfg.AdBlock.Enabled == on {
+		m.mu.Unlock()
+		if on {
+			return "广告拦截已是开启状态", nil
+		}
+		return "广告拦截已是关闭状态", nil
+	}
+	url := m.Cfg.AdBlockURLOrDefault()
+	m.Cfg.AdBlock.Enabled = on
+	err := m.saveAndReloadLocked()
+	m.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	if !on {
+		return "广告拦截已关闭", nil
+	}
+
+	// 规则集可能尚未缓存：现场下载后再热重载一次
+	if m.adBlockReady() {
+		return fmt.Sprintf("广告拦截已开启，已载入 %d 条拦截域名", m.adBlockDomains()), nil
+	}
+	f := ruleset.NewFetcher("/var/lib/5gpn-next/rulesets")
+	if _, ferr := f.Fetch(ctx, config.AdBlockRuleSetName, url); ferr != nil {
+		return "", fmt.Errorf("规则集下载失败（已开启，但暂未生效）: %w", ferr)
+	}
+	if rerr := m.ReloadRuntime(); rerr != nil {
+		return "", fmt.Errorf("规则集已下载，重载失败: %w", rerr)
+	}
+	return fmt.Sprintf("广告拦截已开启，已载入 %d 条拦截域名", m.adBlockDomains()), nil
+}
+
+func (m *Manager) adBlockDomains() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Policy == nil {
+		return 0
+	}
+	return m.Policy.DomainSetLen(config.AdBlockRuleSetName)
+}
+
+func (m *Manager) adBlockReady() bool { return m.adBlockDomains() > 0 }
+
+// AllowAd 把域名加入广告白名单（误杀时救急）。
+func (m *Manager) AllowAd(domain string) error {
+	d := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(domain), "."))
+	if d == "" || strings.ContainsAny(d, ",/ ") {
+		return fmt.Errorf("域名 %q 格式不合法", domain)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, x := range m.Cfg.AdBlock.Allowlist {
+		if strings.EqualFold(x, d) {
+			return fmt.Errorf("%q 已在白名单中", d)
+		}
+	}
+	m.Cfg.AdBlock.Allowlist = append(m.Cfg.AdBlock.Allowlist, d)
+	return m.saveAndReloadLocked()
+}
+
+// AdAllowlist 返回白名单副本。
+func (m *Manager) AdAllowlist() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]string(nil), m.Cfg.AdBlock.Allowlist...)
+}
+
+// RemoveAdAllow 按序号移除白名单条目。
+func (m *Manager) RemoveAdAllow(idx int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if idx < 0 || idx >= len(m.Cfg.AdBlock.Allowlist) {
+		return fmt.Errorf("序号 %d 超出范围", idx+1)
+	}
+	m.Cfg.AdBlock.Allowlist = append(m.Cfg.AdBlock.Allowlist[:idx], m.Cfg.AdBlock.Allowlist[idx+1:]...)
+	return m.saveAndReloadLocked()
 }
 
 // ---------- 分流规则 ----------
