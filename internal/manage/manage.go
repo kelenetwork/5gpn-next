@@ -30,6 +30,19 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/update"
 )
 
+// LocationController 是定位修改的控制面。
+//
+// 由 cmd 层注入 mitm.Spoofer；关闭功能时为 nil，manage 层不依赖具体实现。
+type LocationController interface {
+	Enabled() bool
+	Active() bool
+	Location() (lat, lon float64, ok bool)
+	SetLocation(lat, lon float64) error
+	ClearLocation()
+	Rewrites() uint64
+	CAFingerprint() string
+}
+
 // StatsSource 提供运行时计数。
 type StatsSource interface {
 	Snapshot() map[string]int64
@@ -65,6 +78,9 @@ type Manager struct {
 	ProfileBytes func() ([]byte, error)
 	// DNSProfileBytes 返回「蜂窝 DNS 模式」描述文件；未启用 DoT 时为 nil
 	DNSProfileBytes func() ([]byte, error)
+
+	// Location 提供定位修改能力；功能关闭时为 nil。
+	Location LocationController
 
 	// AndroidInfo 返回 Android 接入所需信息
 	AndroidInfo func() AndroidGuide
@@ -611,6 +627,64 @@ func (m *Manager) ensureDomesticRules(ctx context.Context) error {
 		return fmt.Errorf("cn-domain / geoip:cn 内容为空或解析失败")
 	}
 	return nil
+}
+
+// ---------- 定位修改 ----------
+
+// LocationStatus 是定位修改状态快照。
+type LocationStatus struct {
+	// Available 表示功能已在配置中启用（网关侧已就绪）
+	Available bool `json:"available"`
+	// Active 表示已设置坐标、正在改写
+	Active bool    `json:"active"`
+	Lat    float64 `json:"lat,omitempty"`
+	Lon    float64 `json:"lon,omitempty"`
+	// Rewrites 是累计改写次数，用于确认功能真的生效
+	Rewrites uint64 `json:"rewrites"`
+	// CAFingerprint 供用户核对所信任的根证书
+	CAFingerprint string `json:"ca_fingerprint,omitempty"`
+}
+
+// LocationState 返回定位修改状态。
+func (m *Manager) LocationState() LocationStatus {
+	if m.Location == nil {
+		return LocationStatus{}
+	}
+	lat, lon, ok := m.Location.Location()
+	return LocationStatus{
+		Available:     m.Location.Enabled(),
+		Active:        ok,
+		Lat:           lat,
+		Lon:           lon,
+		Rewrites:      m.Location.Rewrites(),
+		CAFingerprint: m.Location.CAFingerprint(),
+	}
+}
+
+// SetLocation 设置目标坐标并持久化。
+func (m *Manager) SetLocation(lat, lon float64) error {
+	if m.Location == nil {
+		return fmt.Errorf("定位修改未启用（需在配置中开启 location.enabled 并重启）")
+	}
+	if err := m.Location.SetLocation(lat, lon); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Cfg.Location.Lat, m.Cfg.Location.Lon, m.Cfg.Location.HasFix = lat, lon, true
+	return m.saveAndReloadLocked()
+}
+
+// ClearLocation 恢复真实定位。
+func (m *Manager) ClearLocation() error {
+	if m.Location == nil {
+		return fmt.Errorf("定位修改未启用")
+	}
+	m.Location.ClearLocation()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Cfg.Location.HasFix = false
+	return m.saveAndReloadLocked()
 }
 
 // ---------- 广告拦截 ----------

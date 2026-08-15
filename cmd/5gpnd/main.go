@@ -24,6 +24,7 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/ingress/relay"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/sniff"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
+	"github.com/kelenetwork/5gpn-next/internal/mitm"
 	"github.com/kelenetwork/5gpn-next/internal/node"
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/probe"
@@ -315,11 +316,32 @@ func cmdRun(args []string) error {
 		}
 	}
 
+	// 定位修改：默认关闭。关闭时不生成 CA、不下发证书、不拦截任何流量。
+	var spoofer *mitm.Spoofer
+	if a.cfg.Location.Enabled {
+		ca, err := mitm.LoadOrCreateCA("/var/lib/5gpn-next/ca")
+		if err != nil {
+			log.Printf("警告: 定位修改初始化失败: %v（功能不可用，其余正常）", err)
+		} else {
+			spoofer = mitm.New(ca)
+			spoofer.SetEnabled(true)
+			if a.cfg.Location.HasFix {
+				if err := spoofer.SetLocation(a.cfg.Location.Lat, a.cfg.Location.Lon); err != nil {
+					log.Printf("警告: 定位坐标无效: %v", err)
+				}
+			}
+			log.Printf("定位修改已启用，根证书指纹 %s", ca.Fingerprint())
+		}
+	}
+
 	var profBytes []byte
 	if a.cfg.Relay.ProfilePath != "" {
 		opts := profile.Default(a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
 		opts.Token = a.cfg.Relay.Token
 		opts.ExcludedDomains = a.cfg.ExcludedDomains
+		if spoofer != nil {
+			opts.RootCADER = spoofer.CACertDER()
+		}
 		if b, err := opts.Build(); err == nil {
 			profBytes = b
 		}
@@ -350,6 +372,9 @@ func cmdRun(args []string) error {
 		ProfileBytes:    profBytes,
 		DNSProfilePath:  dnsProfilePath,
 		DNSProfileBytes: dnsProfBytes,
+	}
+	if spoofer != nil {
+		srv.LocationSpoof = spoofer
 	}
 	srv.SetRuntime(a.engine, a.reg)
 
@@ -385,8 +410,12 @@ func cmdRun(args []string) error {
 		o := profile.Default(a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
 		o.Token = a.cfg.Relay.Token
 		o.ExcludedDomains = a.cfg.ExcludedDomains
+		if spoofer != nil {
+			o.RootCADER = spoofer.CACertDER()
+		}
 		return o.Build()
 	}
+	mgr.Location = spoofer
 	if a.cfg.Android.Enabled {
 		mgr.DNSProfileBytes = func() ([]byte, error) {
 			o := profile.DefaultDNS(a.cfg.Relay.Host)

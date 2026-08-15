@@ -29,6 +29,19 @@ import (
 // TokenHeader 是描述文件 AdditionalHTTPHeaderFields 下发的鉴权头。
 const TokenHeader = "X-5gpn-Token"
 
+// LocationSpoofer 提供 Apple 网络定位改写。
+//
+// 由 cmd 层注入，relay 包不直接依赖 mitm 实现细节；功能关闭时注入 nil，
+// 连接路径上零开销、零解密。
+type LocationSpoofer interface {
+	// Active 报告是否已启用且已设置目标坐标。
+	Active() bool
+	// Handles 报告该主机是否在中间人白名单内（硬编码，不可配置）。
+	Handles(host string) bool
+	// Serve 在客户端连接上终止 TLS、改写响应；upstream 为到真实服务器的连接。
+	Serve(client, upstream net.Conn, host string) error
+}
+
 // Recorder 接收每条连接的决策记录。
 type Recorder interface {
 	Record(t *trace.Trace)
@@ -63,6 +76,10 @@ type Server struct {
 	// DNSProfilePath / DNSProfileBytes 提供「蜂窝 DNS 模式」描述文件（可为空）
 	DNSProfilePath  string
 	DNSProfileBytes []byte
+
+	// LocationSpoof 提供 Apple 网络定位改写；为 nil 时所有流量正常透传，
+	// 不做任何 TLS 解密。
+	LocationSpoof LocationSpoofer
 
 	// OnConn 在每条连接结束时上报流量与结果，供统计使用（可为空）。
 	// host 为域名或裸 IP，action 取 direct / proxy / block。
@@ -241,12 +258,66 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	defer up.Close()
 	tr.Step(trace.StageConnect, trace.StatusOK, "TCP %s 已建立", up.RemoteAddr())
 
+	// ---- 定位改写（仅白名单域名，且功能已开启）----
+	//
+	// 命中时本地终止 TLS 并改写 WLOC 响应；其余流量一律走下方普通隧道，
+	// 绝不解密。改写失败直接关闭连接，客户端会重试并退回真实定位。
+	if sp := s.LocationSpoof; sp != nil && sp.Active() && sp.Handles(t.Host) {
+		tr.Step(trace.StageApp, trace.StatusOK, "定位改写：终止 TLS 并重写坐标")
+		s.serveLocationSpoof(w, r, up, tr, t.Host, actionName)
+		return
+	}
+
 	// ---- 建立隧道 ----
 	if r.ProtoMajor == 1 {
 		s.tunnelH1(w, up, tr, t.Host, actionName)
 		return
 	}
 	s.tunnelH2(w, r, up, tr, t.Host, actionName)
+}
+
+// serveLocationSpoof 在 CONNECT 隧道上执行定位改写。
+//
+// iOS Relay 走 HTTP/2，需要把 stream 适配成 net.Conn 交给 TLS 终止；
+// HTTP/1.1 则 Hijack 后直接使用底层连接。
+func (s *Server) serveLocationSpoof(w http.ResponseWriter, r *http.Request, up net.Conn, tr *trace.Trace, host, action string) {
+	var client net.Conn
+	if r.ProtoMajor == 1 {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			tr.Fail(trace.StageApp, errHijackUnsupported, "定位改写无法接管 h1 连接")
+			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+			return
+		}
+		cli, buf, err := hj.Hijack()
+		if err != nil {
+			tr.Fail(trace.StageApp, err, "hijack 失败")
+			return
+		}
+		defer cli.Close()
+		if _, err := buf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+			tr.Fail(trace.StageApp, err, "写 200 失败")
+			return
+		}
+		buf.Flush()
+		client = cli
+	} else {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		sc := newStreamConn(r.Body, w)
+		defer sc.Close()
+		client = sc
+	}
+
+	if err := s.LocationSpoof.Serve(client, up, host); err != nil {
+		tr.Fail(trace.StageApp, err, "定位改写失败，连接已关闭（客户端将退回真实定位）")
+		s.report(host, action, 0, 0, true)
+		return
+	}
+	tr.Step(trace.StageApp, trace.StatusOK, "定位改写完成")
+	s.report(host, action, 0, 0, false)
 }
 
 // tunnelH2 处理 HTTP/2 CONNECT，这是 iOS Relay 的实际路径。

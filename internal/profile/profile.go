@@ -12,6 +12,7 @@ package profile
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"sort"
@@ -43,12 +44,19 @@ type Options struct {
 	DisplayName  string
 	Description  string
 
+	// RootCADER 非空时，描述文件额外携带根证书 payload（定位修改用）。
+	//
+	// 下发后用户仍需在「设置 → 通用 → 关于 → 证书信任设置」里手动
+	// 开启完全信任；iOS 不允许描述文件自动获得根信任。
+	RootCADER []byte
+
 	// 稳定标识：同一网关的后续版本必须复用
 	ProfileIdentifier string
 	RelayIdentifier   string
 	RelayUUID         string
 	ProfileUUID       string
 	RelayPayloadUUID  string
+	CAPayloadUUID     string
 }
 
 // Default 返回填好稳定标识的默认参数。
@@ -129,7 +137,24 @@ func (o Options) Build() ([]byte, error) {
 	root.set("PayloadDescription", str(o.Description))
 	root.set("PayloadOrganization", str(o.Organization))
 	root.set("PayloadRemovalDisallowed", boolean(false))
-	root.set("PayloadContent", array{relay})
+
+	content := array{relay}
+	if len(o.RootCADER) > 0 {
+		if o.CAPayloadUUID == "" {
+			o.CAPayloadUUID = deriveUUID("ca-payload:" + o.Host)
+		}
+		ca := dict{}
+		ca.set("PayloadType", str("com.apple.security.root"))
+		ca.set("PayloadVersion", integer(1))
+		ca.set("PayloadIdentifier", str(o.ProfileIdentifier+".ca"))
+		ca.set("PayloadUUID", str(o.CAPayloadUUID))
+		ca.set("PayloadDisplayName", str("5gpn-NEXT 定位证书"))
+		ca.set("PayloadDescription", str("仅用于修改 Apple 网络定位；网关只对 gs-loc.apple.com 解密，其余流量一律透传。"))
+		ca.set("PayloadCertificateFileName", str("5gpn-next-ca.cer"))
+		ca.set("PayloadContent", data(o.RootCADER))
+		content = append(content, ca)
+	}
+	root.set("PayloadContent", content)
 
 	var buf bytes.Buffer
 	buf.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
@@ -212,6 +237,16 @@ func EffectiveExcludedDomains(custom []string) []string {
 
 type node interface {
 	render(b *bytes.Buffer, indent int)
+}
+
+// data 渲染 <data> 节点（base64），用于内嵌根证书 DER。
+type data []byte
+
+func (d data) render(b *bytes.Buffer, ind int) {
+	pad(b, ind)
+	b.WriteString("<data>")
+	b.WriteString(base64.StdEncoding.EncodeToString(d))
+	b.WriteString("</data>\n")
 }
 
 type str string

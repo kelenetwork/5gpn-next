@@ -39,6 +39,9 @@ type Config struct {
 	// AdBlock 是广告/追踪拦截配置。
 	AdBlock AdBlockConfig `json:"ad_block"`
 
+	// Location 是定位修改配置。
+	Location LocationConfig `json:"location"`
+
 	// PreferIPv4 让所有出口对 IPv6 字面量目标立即快速失败（0ms），
 	// 促使客户端 Happy Eyeballs 直接改用 IPv4。
 	//
@@ -210,6 +213,23 @@ func (c *Config) EffectiveRuleSets() []RuleSetConfig {
 		URL:           c.AdBlockURLOrDefault(),
 		IntervalHours: 24,
 	})
+}
+
+// LocationConfig 控制 Apple 网络定位修改。
+//
+// 原理：手机把扫到的 WiFi/基站上报给 gs-loc.apple.com，它返回坐标；
+// 网关对该域名（且仅该域名）做 TLS 终止并改写响应。
+//
+// ⚠️ 需要手机信任网关签发的根证书；默认关闭，关闭时不生成 CA、
+// 不下发证书、不拦截任何流量。
+type LocationConfig struct {
+	// Enabled 开关功能。
+	Enabled bool `json:"enabled"`
+	// Lat / Lon 是目标坐标；HasFix 为 false 时不改写（真实定位）。
+	Lat float64 `json:"lat,omitempty"`
+	Lon float64 `json:"lon,omitempty"`
+	// HasFix 表示已设置目标坐标。
+	HasFix bool `json:"has_fix,omitempty"`
 }
 
 // RuleSetConfig 是一个规则集来源。

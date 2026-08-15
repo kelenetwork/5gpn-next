@@ -365,6 +365,21 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showEgress(ctx, v)
 	case cmd == "rules":
 		b.showRules(ctx, v)
+	case cmd == "location":
+		b.showLocation(ctx, v)
+	case cmd == "loc_clear":
+		if err := b.Manager.ClearLocation(); err != nil {
+			b.render(ctx, v, errBox("恢复失败", err), backTo("location"))
+			return
+		}
+		b.showLocation(ctx, v)
+	case cmd == "ask_loc_set":
+		b.ask(ctx, v, "loc_set",
+			"📍 <b>设置定位</b>\n\n"+
+				"直接发送位置或坐标均可：\n\n"+
+				"• Telegram 附件 → 位置（最方便）\n"+
+				"• 文本坐标：<code>31.2304,121.4737</code>\n\n"+
+				"<i>顺序为纬度,经度（WGS84）。</i>")
 	case cmd == "adblock":
 		b.showAdBlock(ctx, v)
 	case cmd == "adblock_on":
@@ -492,6 +507,18 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 		}
 		b.showRules(ctx, v)
 
+	case "loc_set":
+		lat, lon, err := parseLatLon(text)
+		if err != nil {
+			b.render(ctx, v, errBox("格式错误", err), backTo("location"))
+			return
+		}
+		if err := b.Manager.SetLocation(lat, lon); err != nil {
+			b.render(ctx, v, errBox("设置失败", err), backTo("location"))
+			return
+		}
+		b.showLocation(ctx, v)
+
 	case "ad_allow":
 		if err := b.Manager.AllowAd(text); err != nil {
 			b.render(ctx, v, errBox("添加失败", err), backTo("adblock"))
@@ -543,9 +570,9 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 	b.render(ctx, v, sb.String(), inlineKeyboard(
 		[]btn{{"📊 运行状态", "status"}, {"📈 流量统计", "traffic"}},
 		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
-		[]btn{{"🛡 广告拦截", "adblock"}, {"🩺 连通诊断", "ask_probe"}},
-		[]btn{{"📱 客户端接入", "client"}, {"🖥 内网面板", "panel"}},
-		[]btn{{"🚀 版本更新", "update"}},
+		[]btn{{"🛡 广告拦截", "adblock"}, {"📍 修改定位", "location"}},
+		[]btn{{"🩺 连通诊断", "ask_probe"}, {"📱 客户端接入", "client"}},
+		[]btn{{"🖥 内网面板", "panel"}, {"🚀 版本更新", "update"}},
 	))
 }
 
@@ -697,6 +724,73 @@ func (b *Bot) doTestEgress(ctx context.Context, v view, name string) {
 			[]btn{{"🔁 再测一次", "test_egress:" + name}},
 			[]btn{{"« 返回出口", "egress"}},
 		))
+}
+
+// parseLatLon 解析“纬度,经度”文本。
+func parseLatLon(s string) (float64, float64, error) {
+	f := strings.FieldsFunc(strings.TrimSpace(s), func(r rune) bool {
+		return r == ',' || r == '，' || r == ' ' || r == '\t'
+	})
+	if len(f) != 2 {
+		return 0, 0, fmt.Errorf("需要两个数字，形如 31.2304,121.4737")
+	}
+	lat, err := strconv.ParseFloat(f[0], 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("纬度 %q 不是数字", f[0])
+	}
+	lon, err := strconv.ParseFloat(f[1], 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("经度 %q 不是数字", f[1])
+	}
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return 0, 0, fmt.Errorf("坐标超出范围")
+	}
+	return lat, lon, nil
+}
+
+// showLocation 展示定位修改状态。
+func (b *Bot) showLocation(ctx context.Context, v view) {
+	st := b.Manager.LocationState()
+
+	var sb strings.Builder
+	sb.WriteString("📍 <b>修改定位</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+
+	if !st.Available {
+		sb.WriteString("状态　<b>未启用</b>\n\n")
+		sb.WriteString("<blockquote>该功能需要手机信任网关签发的根证书，因此默认关闭。\n\n")
+		sb.WriteString("开启方法：编辑 <code>/etc/5gpn-next/config.json</code>，\n")
+		sb.WriteString("把 <code>location.enabled</code> 设为 <code>true</code>，\n")
+		sb.WriteString("然后 <code>systemctl restart 5gpn-next</code>。\n\n")
+		sb.WriteString("启用后需重新安装 Relay 描述文件（含根证书）。</blockquote>")
+		b.render(ctx, v, sb.String(), backTo("menu"))
+		return
+	}
+
+	if st.Active {
+		fmt.Fprintf(&sb, "状态　<b>已生效</b>\n坐标　<code>%.6f, %.6f</code>\n", st.Lat, st.Lon)
+		fmt.Fprintf(&sb, "已改写　<b>%d</b> 次\n\n", st.Rewrites)
+		if st.Rewrites == 0 {
+			sb.WriteString("<blockquote>⚠️ 尚未发生改写。iOS 26+ 会缓存定位，\n")
+			sb.WriteString("设置后需<b>重启手机</b>才会重新发起定位请求。</blockquote>\n\n")
+		}
+	} else {
+		sb.WriteString("状态　<b>未设置</b>（使用真实定位）\n\n")
+	}
+
+	sb.WriteString("<blockquote>仅改写 <b>网络定位</b>（WiFi/基站），不影响 GPS 硬件定位。\n")
+	sb.WriteString("室内/WiFi 环境效果最好；室外 GPS 信号强时系统可能仍以 GPS 为准。\n")
+	sb.WriteString("网关只对 <code>gs-loc.apple.com</code> 解密，其余流量一律透传。</blockquote>")
+	if st.CAFingerprint != "" {
+		fmt.Fprintf(&sb, "\n\n<i>根证书指纹 <code>%s</code></i>", html.EscapeString(truncateText(st.CAFingerprint, 32)))
+	}
+
+	rows := [][]btn{{{"📍 设置定位", "ask_loc_set"}}}
+	if st.Active {
+		rows = append(rows, []btn{{"♻️ 恢复真实定位", "loc_clear"}})
+	}
+	rows = append(rows, []btn{{"🔄 刷新", "location"}, {"« 返回主菜单", "menu"}})
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
 // showAdBlock 展示广告拦截状态与开关。
