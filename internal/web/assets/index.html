@@ -23,54 +23,76 @@
   </div>
 </header>
 
+<div class="wrap phead">
+  <h1>管理面板</h1>
+  <p>关键状态每 15 秒自动刷新 · <span class="uptime" id="hero-uptime">加载中…</span></p>
+</div>
+
 <main class="wrap">
 
-  <section class="hero" aria-labelledby="hero-title">
-    <div class="hero-copy">
-      <p class="eyebrow">ENCRYPTED DNS GATEWAY</p>
-      <h1 id="hero-title">分流、拦截与出口，<br><em>都留在服务端。</em></h1>
-      <p class="hero-lead">iPhone 使用蜂窝加密 DNS，Android 使用系统私人 DNS。手机无需安装代理 App，即可获得国内直连、国外分流与 DNS 广告拦截。</p>
-      <div class="hero-badges" aria-label="核心能力">
-        <span>免客户端</span>
-        <span>DNS 拦截</span>
-        <span>多出口</span>
-      </div>
-    </div>
-    <aside class="hero-console" aria-label="实时摘要">
-      <div class="console-head">
-        <span class="console-title"><i></i> 实时运行</span>
-        <span id="hero-uptime">加载中…</span>
-      </div>
-      <dl>
-        <div><dt>DNS 查询</dt><dd id="hero-dns">—</dd></div>
-        <div><dt>今日拦截</dt><dd id="hero-blocked">—</dd></div>
-        <div><dt>国外出口</dt><dd id="hero-egress">—</dd></div>
-      </dl>
-    </aside>
-  </section>
+  <div class="summary" aria-label="实时摘要">
+    <div class="sum-card"><span>DNS 查询</span><strong id="hero-dns">—</strong></div>
+    <div class="sum-card"><span>国外出口</span><strong id="hero-egress">—</strong></div>
+    <div class="sum-card"><span>今日拦截</span><strong id="hero-blocked">—</strong></div>
+  </div>
 
-  <section class="section" aria-labelledby="status-title">
-    <div class="section-head">
-      <div>
-        <p class="section-kicker">OVERVIEW</p>
-        <h2 id="status-title">运行概览</h2>
-      </div>
-      <p>关键状态每 15 秒自动刷新</p>
+  <section class="card" aria-labelledby="status-title">
+    <div class="chead">
+      <h2 id="status-title"><span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 20V10M12 20V4M20 20v-7"/></svg></span>运行概览</h2>
     </div>
     <div class="stat-grid" id="stat-grid" aria-live="polite">
       <div class="stat"><span class="stat-label">加载中</span><span class="stat-value">—</span></div>
     </div>
   </section>
 
-  <section class="section adblock-section" aria-labelledby="adblock-title">
-    <div class="section-head action-head">
-      <div>
-        <p class="section-kicker">PROTECTION</p>
-        <h2 id="adblock-title">广告拦截</h2>
-      </div>
+  <section class="card" aria-labelledby="egress-title">
+    <div class="chead">
+      <h2 id="egress-title"><span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4M3 6h18M7 22l-4-4 4-4M21 18H3"/></svg></span>国外默认出口</h2>
+    </div>
+    <p class="intro">只决定国外未命中流量。国内域名与 GEOIP 规则优先直连，自定义规则拥有最高优先级。</p>
+    <div id="egress-list" class="rows"></div>
+
+    <div class="form">
+      <label for="egress-link">添加出口</label>
+      <textarea id="egress-link" rows="2"
+        placeholder="粘贴节点分享链接，支持 ss:// vless:// vmess:// trojan:// hysteria2:// tuic:// socks5://"></textarea>
+      <div class="act"><button class="btn" id="egress-add" type="button">添加出口</button></div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="rules-title">
+    <div class="chead">
+      <h2 id="rules-title"><span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M8 21H3v-5M21 3l-7 7M3 21l7-7"/></svg></span>分流规则</h2>
+      <span class="note">有序匹配 · 命中即停</span>
+    </div>
+    <div id="rules-list" class="rows"></div>
+
+    <div class="form">
+      <label for="rule-input">添加规则</label>
+      <input id="rule-input" type="text" autocomplete="off" placeholder="DOMAIN-SUFFIX,openai.com,proxy:node">
+      <div class="act"><button class="btn" id="rule-add" type="button">添加规则</button></div>
+      <p class="hint"><b>类型：</b>DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、RULE-SET、GEOIP　·　<b>动作：</b>direct、block、proxy:出口名</p>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="probe-title">
+    <div class="chead">
+      <h2 id="probe-title"><span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></span>连通诊断</h2>
+    </div>
+    <p class="intro">依次检查策略、出口、连接与应用响应，失败时直接指出具体层级。</p>
+    <div class="form form-inline">
+      <input id="probe-target" type="text" autocomplete="off" placeholder="youtube.com">
+      <button class="btn" id="probe-run" type="button">开始诊断</button>
+    </div>
+    <pre id="probe-out" class="probe-out" hidden></pre>
+  </section>
+
+  <section class="card" aria-labelledby="adblock-title">
+    <div class="chead">
+      <h2 id="adblock-title"><span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg></span>广告拦截</h2>
       <button class="btn btn-state" id="adblock-toggle" type="button" disabled>加载中…</button>
     </div>
-    <p class="section-intro">命中广告规则后直接返回 NXDOMAIN。这里统计的每一次，都是已经成功写回手机的拦截响应。</p>
+    <p class="intro">命中广告规则后直接返回 NXDOMAIN。这里统计的每一次，都是已经成功写回手机的拦截响应。</p>
 
     <div class="ad-metrics">
       <div><span>今日成功</span><strong id="ad-today">—</strong><small>次</small></div>
@@ -98,57 +120,6 @@
         <button class="btn" id="ad-allow-add" type="button">加入白名单</button>
       </div>
     </div>
-  </section>
-
-  <section class="section" aria-labelledby="egress-title">
-    <div class="section-head">
-      <div>
-        <p class="section-kicker">ROUTING</p>
-        <h2 id="egress-title">国外默认出口</h2>
-      </div>
-    </div>
-    <p class="section-intro">只决定国外未命中流量。国内域名与 GEOIP 规则优先直连，自定义规则拥有最高优先级。</p>
-    <div id="egress-list" class="rows"></div>
-
-    <div class="form">
-      <label for="egress-link">添加出口</label>
-      <textarea id="egress-link" rows="2"
-        placeholder="粘贴节点分享链接，支持 ss:// vless:// vmess:// trojan:// hysteria2:// tuic:// socks5://"></textarea>
-      <button class="btn" id="egress-add" type="button">添加出口</button>
-    </div>
-  </section>
-
-  <section class="section" aria-labelledby="rules-title">
-    <div class="section-head">
-      <div>
-        <p class="section-kicker">POLICY</p>
-        <h2 id="rules-title">分流规则</h2>
-      </div>
-      <p>有序匹配 · 命中即停</p>
-    </div>
-    <div id="rules-list" class="rows"></div>
-
-    <div class="form">
-      <label for="rule-input">添加规则</label>
-      <input id="rule-input" type="text" autocomplete="off" placeholder="DOMAIN-SUFFIX,openai.com,proxy:node">
-      <button class="btn" id="rule-add" type="button">添加规则</button>
-      <p class="hint"><b>类型：</b>DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、RULE-SET、GEOIP　·　<b>动作：</b>direct、block、proxy:出口名</p>
-    </div>
-  </section>
-
-  <section class="section diagnosis" aria-labelledby="probe-title">
-    <div class="section-head">
-      <div>
-        <p class="section-kicker">DIAGNOSTICS</p>
-        <h2 id="probe-title">连通诊断</h2>
-      </div>
-    </div>
-    <p class="section-intro">依次检查策略、出口、连接与应用响应，失败时直接指出具体层级。</p>
-    <div class="form form-inline">
-      <input id="probe-target" type="text" autocomplete="off" placeholder="youtube.com">
-      <button class="btn" id="probe-run" type="button">开始诊断</button>
-    </div>
-    <pre id="probe-out" class="probe-out" hidden></pre>
   </section>
 
   <footer>
