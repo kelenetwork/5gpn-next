@@ -141,7 +141,10 @@ func (s *Socks5) DialContext(ctx context.Context, network, addr string) (net.Con
 		c.Close()
 		return nil, err
 	}
-	return c, nil
+	// mihomo 会先乐观回复 CONNECT 成功再去连上游，上游不可达时静默挂死。
+	// 用首字节看门狗兜底：客户端发数据后上游久无响应即断开，
+	// 促使 App 快速改试下一个地址（WhatsApp 轮询多个 Meta edge 的关键）。
+	return NewFirstByteGuard(c, FirstByteTimeout), nil
 }
 
 // socks5Handshake 执行无认证 SOCKS5 CONNECT。
