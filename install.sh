@@ -455,6 +455,9 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
+# Extended CONNECT（RFC 8441）：iOS Relay 的 connect-udp（QUIC 等 UDP
+# 流量）依赖它；x/net/http2 默认关闭，且只在包 init 时读取该开关。
+Environment=GODEBUG=http2xconnect=1
 ExecStart=/usr/local/bin/5gpnd run -c /etc/5gpn-next/config.json
 Restart=on-failure
 RestartSec=3s

@@ -38,11 +38,43 @@ import (
 
 var version = "dev"
 
+// ensureExtendedConnect 保证 GODEBUG 里带 http2xconnect=1。
+//
+// x/net/http2 默认关闭 Extended CONNECT（RFC 8441），而 iOS Relay 的
+// connect-udp（QUIC 等 UDP 流量）必须依赖它；该开关在 http2 包 init()
+// 时读取，等 main() 执行已经晚了，因此只能带着环境变量重新 exec 自身。
+// systemd 单元里也会显式设置，此处只是兜底，保证手动启动同样生效。
+func ensureExtendedConnect() {
+	if strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=1") {
+		return
+	}
+	// 防重入：exec 失败或环境异常时绝不无限重启
+	if os.Getenv("FIVEGPN_XCONNECT_REEXEC") == "1" {
+		log.Printf("警告: 未能启用 HTTP/2 Extended CONNECT，UDP(QUIC) 代理不可用")
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	godebug := "http2xconnect=1"
+	if old := os.Getenv("GODEBUG"); old != "" {
+		godebug = old + "," + godebug
+	}
+	env := append(os.Environ(), "GODEBUG="+godebug, "FIVEGPN_XCONNECT_REEXEC=1")
+	if err := syscall.Exec(exe, os.Args, env); err != nil {
+		log.Printf("警告: 启用 Extended CONNECT 失败: %v（UDP 代理不可用）", err)
+	}
+}
+
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+	if os.Args[1] == "run" {
+		ensureExtendedConnect()
 	}
 
 	cmd := os.Args[1]
@@ -369,6 +401,21 @@ func cmdRun(args []string) error {
 		a.engine, a.reg, a.cfg = nb.engine, nb.reg, nb.cfg
 		return nb.engine, nb.reg, nil
 	}
+
+	// 出口 IPv6 能力后台刷新：旧版本添加的出口 has_ipv6 恒为 false，
+	// 而蜂窝多为 v6 环境（WhatsApp 优先连 Meta IPv6 字面量）。
+	// 启动后实测一次 SOCKS ATYP=4 代拨能力，变化则持久化并热重载。
+	go func() {
+		time.Sleep(3 * time.Second) // 等 mihomo 实例就绪
+		changed, err := mgr.RefreshEgressIPv6(4 * time.Second)
+		if err != nil {
+			log.Printf("出口 IPv6 能力刷新失败: %v", err)
+			return
+		}
+		if len(changed) > 0 {
+			log.Printf("出口 IPv6 能力已更新: %s", strings.Join(changed, ", "))
+		}
+	}()
 
 	// 规则集后台刷新：启动用缓存秒起，下载移到后台；
 	// 刷新成功后热重载引擎，服务全程在线。

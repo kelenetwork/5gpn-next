@@ -124,8 +124,10 @@ type EgressStatus struct {
 	// Display 为展示名（节点原始备注名，可含 emoji/中文）
 	Display string `json:"display"`
 	// Server 为节点服务器 host:port（仅代理出口）
-	Server  string `json:"server,omitempty"`
-	Current bool   `json:"current"`
+	Server string `json:"server,omitempty"`
+	// HasIPv6 表示该出口能否代拨 IPv6 目标（自动探测）
+	HasIPv6 bool `json:"has_ipv6"`
+	Current bool `json:"current"`
 }
 
 // Status 返回当前状态。
@@ -155,6 +157,7 @@ func (m *Manager) Status(version string) Status {
 			Name: e.Name, Type: proto, Addr: e.Addr,
 			Display: displayOf(e),
 			Server:  e.Server,
+			HasIPv6: e.HasIPv6,
 			Current: strings.EqualFold(e.Name, cur),
 		})
 	}
@@ -252,9 +255,14 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 			"journalctl -u mihomo-5gpn@%s -n 30 查看细节", err, name)
 	}
 
+	// 探测节点能否代拨 IPv6：蜂窝多为 v6 环境，WhatsApp 等 App 优先连
+	// IPv6 字面量；节点有 v6 能力时由节点代拨，无则快速失败促使回落 IPv4。
+	hasV6 := egress.ProbeSocks5IPv6(addr, 4*time.Second)
+
 	m.Cfg.Egress = append(m.Cfg.Egress, config.EgressConfig{
 		Name: name, Type: "socks5",
 		Addr:        addr,
+		HasIPv6:     hasV6,
 		DisplayName: strings.TrimSpace(n.Name),
 		Proto:       n.Type,
 		Server:      fmt.Sprintf("%s:%d", n.Server, n.Port),
@@ -262,7 +270,53 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 	if err := m.saveAndReloadLocked(); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("已添加出口 %s（%s），联通性验证通过", displayOf(m.Cfg.Egress[len(m.Cfg.Egress)-1]), n.Redacted()), nil
+	v6mark := "IPv6 ✗"
+	if hasV6 {
+		v6mark = "IPv6 ✓"
+	}
+	return fmt.Sprintf("已添加出口 %s（%s，%s），联通性验证通过", displayOf(m.Cfg.Egress[len(m.Cfg.Egress)-1]), n.Redacted(), v6mark), nil
+}
+
+// RefreshEgressIPv6 重新探测全部 SOCKS5 出口的 IPv6 代拨能力。
+// 旧版本添加的出口 has_ipv6 恒为 false，启动后后台刷新一次即可自动修正。
+func (m *Manager) RefreshEgressIPv6(timeout time.Duration) ([]string, error) {
+	m.mu.RLock()
+	type probeItem struct {
+		name, addr string
+		hasV6      bool
+	}
+	var items []probeItem
+	for _, e := range m.Cfg.Egress {
+		if e.Type == "socks5" && e.Addr != "" {
+			items = append(items, probeItem{e.Name, e.Addr, e.HasIPv6})
+		}
+	}
+	m.mu.RUnlock()
+
+	result := make(map[string]bool, len(items))
+	var changed []string
+	for _, it := range items {
+		got := egress.ProbeSocks5IPv6(it.addr, timeout)
+		result[it.name] = got
+		if got != it.hasV6 {
+			changed = append(changed, fmt.Sprintf("%s→%v", it.name, got))
+		}
+	}
+	if len(changed) == 0 {
+		return nil, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.Cfg.Egress {
+		if v, ok := result[m.Cfg.Egress[i].Name]; ok && m.Cfg.Egress[i].Type == "socks5" {
+			m.Cfg.Egress[i].HasIPv6 = v
+		}
+	}
+	if err := m.saveAndReloadLocked(); err != nil {
+		return changed, err
+	}
+	return changed, nil
 }
 
 // displayOf 返回出口的展示名：优先节点原始备注名。

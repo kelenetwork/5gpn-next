@@ -127,6 +127,11 @@ func (s *Socks5) Name() string  { return s.name }
 func (s *Socks5) HasIPv6() bool { return s.hasV6 }
 
 func (s *Socks5) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	// 节点无 v6 能力时对 IPv6 字面量快速失败，促使客户端 Happy Eyeballs
+	// 立即回落 IPv4；有 v6 能力则由节点代拨（SOCKS ATYP=4）。
+	if err := guardIPv6(addr, s.hasV6); err != nil {
+		return nil, err
+	}
 	c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
 		return nil, fmt.Errorf("连接 SOCKS5 上游 %s 失败: %w", s.addr, err)
@@ -215,6 +220,39 @@ func socks5Handshake(c net.Conn, target string) error {
 		return err
 	}
 	return nil
+}
+
+// ProbeSocks5IPv6 探测 SOCKS5 上游（mihomo 节点）能否代拨 IPv6 目标。
+//
+// KFC 本机无 IPv6，但落地节点自身往往有 v6 能力；经 ATYP=4 CONNECT
+// 实测一次即可确认。探测目标选 Cloudflare anycast，全球可达且稳定。
+func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {
+	d := net.Dialer{Timeout: timeout}
+	c, err := d.Dial("tcp", addr)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(timeout))
+
+	if _, err := c.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return false
+	}
+	rep := make([]byte, 2)
+	if _, err := readFull(c, rep); err != nil || rep[0] != 0x05 || rep[1] != 0x00 {
+		return false
+	}
+	ip := netip.MustParseAddr("2606:4700:4700::1111").As16()
+	req := append([]byte{0x05, 0x01, 0x00, 0x04}, ip[:]...)
+	req = append(req, 0x01, 0xbb) // 443
+	if _, err := c.Write(req); err != nil {
+		return false
+	}
+	head := make([]byte, 4)
+	if _, err := readFull(c, head); err != nil {
+		return false
+	}
+	return head[1] == 0x00
 }
 
 func readFull(c net.Conn, b []byte) (int, error) {

@@ -120,15 +120,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RFC 9298 UDP over HTTP：P0 未观察到 iOS 使用，先记录待 H3 阶段处理
+	// RFC 9298 connect-udp：QUIC 等 UDP 流量（抖音/TikTok 短视频依赖）。
+	// iOS 用 Extended CONNECT（:protocol=connect-udp）发起，数据面走
+	// RFC 9297 capsule；旧版本此处直接 501，导致短视频刷不出下一条。
 	if strings.HasPrefix(r.URL.Path, "/.well-known/masque/udp/") {
 		s.Stats.UDPAttempt.Add(1)
-		http.Error(w, "udp proxying not enabled", http.StatusNotImplemented)
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expect CONNECT", http.StatusBadRequest)
+			return
+		}
+		s.handleConnectUDP(w, r)
 		return
 	}
 
 	if r.Method != http.MethodConnect {
 		http.Error(w, "expect CONNECT", http.StatusBadRequest)
+		return
+	}
+
+	// Extended CONNECT 的其它 :protocol 一律拒绝，避免被当成普通隧道
+	if p := r.Header.Get(":protocol"); p != "" && p != "connect-udp" {
+		http.Error(w, "unsupported connect protocol", http.StatusNotImplemented)
 		return
 	}
 
