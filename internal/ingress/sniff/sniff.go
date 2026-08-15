@@ -1,14 +1,11 @@
-// Package sniff 实现 Android 路径的流量接管。
+// Package sniff 实现加密 DNS 路径的流量接管。
 //
-// Android 系统只提供「私密 DNS」一个入口，拿不到应用层目的地。
 // DoT 把代理域名的 A 记录改写成网关 IP 后，流量会落到本包监听的
-// 80 / 443 端口，这里从 TLS ClientHello 的 SNI 或 HTTP Host 还原目的地。
+// 80 / 443 端口，这里从 TLS ClientHello 的 SNI、HTTP Host 或 DNS
+// 线索还原目的地。
 //
-// 与 iOS 的 Relay 路径相比，这条路存在固有短板：
-//   - 无 SNI 的私有协议（如 WhatsApp Noise）无法还原目的地
-//   - QUIC 需要拒绝以促使客户端回落 TCP
-//
-// 这正是 iOS 优先使用 Relay 的原因；本路径仅为 Android 兼容而存在。
+// 这条路径存在明确边界：无 SNI 且没有可用 DNS 线索的私有协议无法
+// 还原目的地；QUIC 需要拒绝以促使客户端回落 TCP。
 package sniff
 
 import (
@@ -46,12 +43,6 @@ type Server struct {
 
 	Recorder Recorder
 	OnConn   ConnStat
-
-	// LocationSpoof 提供定位改写；为 nil 时所有流量正常透传，不做任何解密。
-	//
-	// 蜂窝 DNS 模式下 gs-loc.apple.com 会被 DoT 改写到网关，
-	// 流量落到本包监听的 443，此处从 SNI 还原域名后即可改写坐标。
-	LocationSpoof LocationSpoofer
 
 	// HintLookup 返回该客户端最近经 DoT 被改写到网关的域名（可为空）。
 	// 无 SNI 私有协议（如 WhatsApp Noise）嗅探失败时用它回退还原目的地；
@@ -188,34 +179,6 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	defer up.Close()
 	s.Handled.Add(1)
 	tr.Step(trace.StageConnect, trace.StatusOK, "TCP %s 已建立", up.RemoteAddr())
-
-	// ---- 定位改写（仅白名单域名，且功能已开启）----
-	//
-	// 命中时本地终止 TLS 并改写 WLOC 响应；其余流量走下方普通转发，
-	// 绝不解密。预读的 ClientHello 字节需随 bufferedConn 交给 TLS 层。
-	if sp := s.LocationSpoof; sp != nil && isTLS && !hinted && sp.Active() && sp.Handles(host) {
-		tr.Step(trace.StageApp, trace.StatusOK, "定位改写：终止 TLS 并重写坐标")
-		n, err := sp.Serve(newBufferedConn(cli, br), up, host)
-		if err != nil {
-			tr.Fail(trace.StageApp, err, "定位改写失败，连接已关闭（客户端将退回真实定位）")
-			if s.OnConn != nil {
-				s.OnConn(host, actionName, 0, 0, true)
-			}
-			return
-		}
-		// n == 0 意味着 TLS 终止成功但坐标未被改写（已原样透传）。
-		// 必须如实上报：之前统一报“改写完成”导致日志看着正常、
-		// 实际定位从未生效，排障时严重误导。
-		if n == 0 {
-			tr.Step(trace.StageApp, trace.StatusWarn, "定位未改写（解析失败，已原样透传）")
-		} else {
-			tr.Step(trace.StageApp, trace.StatusOK, "定位改写完成（%d 个响应）", n)
-		}
-		if s.OnConn != nil {
-			s.OnConn(host, actionName, 0, 0, false)
-		}
-		return
-	}
 
 	// 双向转发；br 中已读出的首包（含无法解析的私有协议字节）需要一并送出
 	var upN, downN int64

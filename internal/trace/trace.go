@@ -16,7 +16,7 @@ import (
 type Stage string
 
 const (
-	StageIngress Stage = "ingress" // 入口：Relay / DoT
+	StageIngress Stage = "ingress" // 入口：DoT / 本地诊断
 	StagePolicy  Stage = "policy"  // 策略：命中哪条规则
 	StageEgress  Stage = "egress"  // 出口：选中哪个落地
 	StageConnect Stage = "connect" // 连接：TCP 建立

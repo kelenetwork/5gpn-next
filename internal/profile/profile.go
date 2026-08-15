@@ -1,14 +1,11 @@
-// Package profile 生成 iOS 描述文件（.mobileconfig）。
+// Package profile 生成 iOS 蜂窝加密 DNS 描述文件（.mobileconfig）。
 //
-// 当前只生成「蜂窝加密 DNS」描述文件（见 dns.go）：
-// 仅蜂窝数据下启用 DoT，Wi-Fi 自动停用，国内目标由 GEOIP 判定后
-// 手机本地直连。Relay 模式已于 v0.12.0 移除（它会让所有流量从
-// 境外网关落地，国内流量绕远且无法按 IP 排除）。
+// 描述文件仅在蜂窝数据下启用 DoT，Wi-Fi 自动停用；国内目标由
+// GEOIP 判定后保持真实地址，由手机本地直连。
 package profile
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"sort"
@@ -19,16 +16,6 @@ import (
 
 type node interface {
 	render(b *bytes.Buffer, indent int)
-}
-
-// data 渲染 <data> 节点（base64），用于内嵌根证书 DER。
-type data []byte
-
-func (d data) render(b *bytes.Buffer, ind int) {
-	pad(b, ind)
-	b.WriteString("<data>")
-	b.WriteString(base64.StdEncoding.EncodeToString(d))
-	b.WriteString("</data>\n")
 }
 
 type str string

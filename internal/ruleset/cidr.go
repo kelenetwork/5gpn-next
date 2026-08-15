@@ -9,8 +9,8 @@ import (
 
 // CIDRSet 存储 IP 前缀集合，用于 GEOIP 判定。
 //
-// 实测发现：iOS Relay 会直接把裸 IP 交给网关（Twitter/Dropbox/XMPP 推送等），
-// 这类连接没有域名可匹配，必须靠 CIDR 判定归属，否则国内 App 的直连部分会绕道。
+// 裸 IP 连接（例如部分推送协议）没有域名可匹配，必须靠 CIDR 判定归属，
+// 否则国内 App 的直连流量会错误绕道。
 type CIDRSet struct {
 	mu sync.RWMutex
 	v4 []netip.Prefix

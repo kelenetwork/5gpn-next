@@ -108,9 +108,8 @@ if [ -n "$BOT_TK" ]; then
   fi
 fi
 
-# iOS 与 Android 一并支持，无需选择。
-# iOS 走系统 Relay，Android 走系统「私人 DNS」，两条路径共用同一套分流策略。
-ANDROID_ON=true
+# iOS 蜂窝加密 DNS 与 Android 私人 DNS 共用同一套接入与分流策略。
+DNS_ON=true
 
 # 域名解析校验
 RESOLVED=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
@@ -269,43 +268,34 @@ else
   warn "未配置落地节点，国外流量将由本机 DIRECT 直出"
 fi
 
-# Android 需要一个"客户端可路由到"的网关地址写入 DNS 应答。
+# 加密 DNS 接入需要一个“客户端可路由到”的网关地址写入 DNS 应答。
 # 优先取落在客户端网段内的本机地址；没有则回退公网 IP。
 GW_IP=""
-if [ "$ANDROID_ON" = "true" ]; then
+if [ "$DNS_ON" = "true" ]; then
   CPFX=${CLIENT_CIDR%%/*}
   CPFX=${CPFX%.*.*}
   GW_IP=$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 \
           | grep "^${CPFX}\." | head -1 || true)
   if [ -z "$GW_IP" ]; then
     GW_IP="$PUBIP"
-    warn "未发现属于 ${CLIENT_CIDR} 的本机地址，Android 网关地址回退为 ${GW_IP}"
-    warn "若手机无法访问该地址，请手工修改 config.json 的 android.gateway_ip"
+    warn "未发现属于 ${CLIENT_CIDR} 的本机地址，加密 DNS 网关地址回退为 ${GW_IP}"
+    warn "若手机无法访问该地址，请手工修改 config.json 的 dns.gateway_ip"
   else
-    ok "Android 网关地址：${GW_IP}"
+    ok "加密 DNS 网关地址：${GW_IP}"
   fi
 fi
 
 # ---------------------------------------------------------------- 5. 写配置
 step "生成配置"
 
-TOKEN=$(head -c 20 /dev/urandom | od -An -tx1 | tr -d ' \n')
 DLPATH="/dl/$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')/5gpn-next.mobileconfig"
 
-# 重装时沿用既有 Token 与描述文件路径：
-# Token 写死在手机描述文件里，换掉 = 所有已装描述文件立即失效断网。
+# 重装时沿用既有描述文件下载路径，避免用户保存的安装链接失效。
+# 同时兼容新版 gateway 与旧版 relay 配置键。
 if [ -s "$CFGDIR/config.json" ]; then
-  OLD_TOKEN=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("relay",{}).get("token",""))' "$CFGDIR/config.json" 2>/dev/null || true)
-  OLD_DLPATH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("relay",{}).get("profile_path",""))' "$CFGDIR/config.json" 2>/dev/null || true)
-  if [ -z "$OLD_TOKEN" ]; then
-    OLD_TOKEN=$(sed -n '/"relay"/,/}/s/.*"token": *"\([0-9a-f]\{16,\}\)".*/\1/p' "$CFGDIR/config.json" | head -1)
-  fi
+  OLD_DLPATH=$(python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));print((c.get("gateway") or c.get("relay") or {}).get("profile_path",""))' "$CFGDIR/config.json" 2>/dev/null || true)
   if [ -z "$OLD_DLPATH" ]; then
     OLD_DLPATH=$(sed -n 's/.*"profile_path": *"\([^"]*\)".*/\1/p' "$CFGDIR/config.json" | head -1)
-  fi
-  if [ -n "$OLD_TOKEN" ]; then
-    TOKEN="$OLD_TOKEN"
-    ok "沿用既有鉴权 Token —— 已安装的描述文件继续有效，无需重装"
   fi
   if [ -n "$OLD_DLPATH" ]; then
     DLPATH="$OLD_DLPATH"
@@ -321,12 +311,11 @@ fi
 
 cat > "$CFGDIR/config.json" <<EOF
 {
-  "relay": {
+  "gateway": {
     "listen": ":${LISTEN_PORT}",
     "host": "${DOMAIN}",
     "cert_file": "${CERT}",
     "key_file": "${KEY}",
-    "token": "${TOKEN}",
     "profile_path": "${DLPATH}"
   },
   "egress": [
@@ -348,7 +337,6 @@ cat > "$CFGDIR/config.json" <<EOF
       "url": "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/cn.txt"
     }
   ],
-  "excluded_domains": [],
   "bot": {
     "token": "${BOT_TK}",
     "admins": [${BOT_IDS_JSON}]
@@ -356,8 +344,8 @@ cat > "$CFGDIR/config.json" <<EOF
   "panel": {
     "enabled": true
   },
-  "android": {
-    "enabled": ${ANDROID_ON},
+  "dns": {
+    "enabled": ${DNS_ON},
     "dot_listen": ":853",
     "gateway_ip": "${GW_IP}",
     "http_listen": ":80",
@@ -380,17 +368,17 @@ ok "配置已写入 $CFGDIR/config.json"
 # ---------------------------------------------------------------- 6. 防火墙
 step "配置防火墙"
 
-ANDROID_NFT=""
-if [ "$ANDROID_ON" = "true" ]; then
+DNS_NFT=""
+if [ "$DNS_ON" = "true" ]; then
   # QUIC 无明文 SNI，无法嗅探接管；reject 让客户端尽快回落 TCP，
   # 直接 drop 会让应用静默等待超时。
-  ANDROID_NFT=$(cat <<NFTEOF
-    ip saddr ${CLIENT_CIDR} tcp dport { 53, 80, 443, 853 } accept comment "5gpn-android"
-    ip saddr ${CLIENT_CIDR} udp dport 53 accept comment "5gpn-android"
-    ip saddr ${CLIENT_CIDR} udp dport 443 reject with icmp port-unreachable comment "5gpn-android-quic"
+  DNS_NFT=$(cat <<NFTEOF
+    ip saddr ${CLIENT_CIDR} tcp dport { 53, 80, 443, 853 } accept comment "5gpn-dns"
+    ip saddr ${CLIENT_CIDR} udp dport 53 accept comment "5gpn-dns"
+    ip saddr ${CLIENT_CIDR} udp dport 443 reject with icmp port-unreachable comment "5gpn-dns-quic"
 NFTEOF
 )
-  ANDROID_NFT="${ANDROID_NFT}
+  DNS_NFT="${DNS_NFT}
 "
 fi
 
@@ -402,12 +390,12 @@ table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
-${ANDROID_NFT}  }
+${DNS_NFT}  }
 }
 EOF
 ok "已放行 ${LISTEN_PORT}/tcp（仅来源 ${CLIENT_CIDR}）"
-if [ "$ANDROID_ON" = "true" ]; then
-  ok "已放行 853/80/443（Android 接入，仅来源 ${CLIENT_CIDR}）"
+if [ "$DNS_ON" = "true" ]; then
+  ok "已放行 853/80/443（加密 DNS 接入，仅来源 ${CLIENT_CIDR}）"
 fi
 
 cat > "$CFGDIR/nft-restore.sh" <<EOF
@@ -420,7 +408,7 @@ table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
-${ANDROID_NFT}  }
+${DNS_NFT}  }
 }
 RULES
 EOF
@@ -446,7 +434,7 @@ step "启动服务"
 
 cat > /etc/systemd/system/5gpn-next.service <<'EOF'
 [Unit]
-Description=5gpn-NEXT gateway (Apple Network Relay)
+Description=5gpn-NEXT encrypted DNS gateway
 Documentation=https://github.com/kelenetwork/5gpn-next
 After=network-online.target
 Wants=network-online.target
@@ -455,9 +443,6 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-# Extended CONNECT（RFC 8441）：iOS Relay 的 connect-udp（QUIC 等 UDP
-# 流量）依赖它；x/net/http2 默认关闭，且只在包 init 时读取该开关。
-Environment=GODEBUG=http2xconnect=1
 ExecStart=/usr/local/bin/5gpnd run -c /etc/5gpn-next/config.json
 Restart=on-failure
 RestartSec=3s

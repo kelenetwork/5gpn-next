@@ -1,10 +1,9 @@
 {
-  "relay": {
-    "listen": ":20444",
-    "host": "kfc.ke1e.de",
-    "cert_file": "/etc/letsencrypt/live/kfc.ke1e.de/fullchain.pem",
-    "key_file": "/etc/letsencrypt/live/kfc.ke1e.de/privkey.pem",
-    "token": "REPLACE_ME",
+  "gateway": {
+    "listen": ":20443",
+    "host": "gateway.example.com",
+    "cert_file": "/etc/letsencrypt/live/gateway.example.com/fullchain.pem",
+    "key_file": "/etc/letsencrypt/live/gateway.example.com/privkey.pem",
     "profile_path": "/dl/REPLACE_RANDOM/5gpn-next.mobileconfig"
   },
   "egress": [
@@ -26,6 +25,31 @@
       "url": "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/cn.txt"
     }
   ],
-  "excluded_domains": [],
+  "ad_block": {
+    "enabled": false,
+    "allowlist": []
+  },
+  "bot": {
+    "token": "",
+    "admins": []
+  },
+  "panel": {
+    "enabled": true
+  },
+  "dns": {
+    "enabled": true,
+    "dot_listen": ":853",
+    "gateway_ip": "172.22.0.1",
+    "http_listen": ":80",
+    "tls_listen": ":443",
+    "upstream": ["223.5.5.5:53", "119.29.29.29:53"]
+  },
+  "update": {
+    "check_enabled": true,
+    "interval_hours": 12,
+    "auto_apply": false
+  },
+  "prefer_ipv4": true,
+  "client_cidr": "172.22.0.0/16",
   "log_path": "/var/log/5gpn-next/trace.jsonl"
 }

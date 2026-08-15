@@ -365,25 +365,6 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showEgress(ctx, v)
 	case cmd == "rules":
 		b.showRules(ctx, v)
-	case cmd == "location":
-		b.showLocation(ctx, v)
-	case cmd == "loc_on":
-		b.doLocationToggle(ctx, v, true)
-	case cmd == "loc_off":
-		b.doLocationToggle(ctx, v, false)
-	case cmd == "loc_clear":
-		if err := b.Manager.ClearLocation(); err != nil {
-			b.render(ctx, v, errBox("恢复失败", err), backTo("location"))
-			return
-		}
-		b.showLocation(ctx, v)
-	case cmd == "ask_loc_set":
-		b.ask(ctx, v, "loc_set",
-			"📍 <b>设置定位</b>\n\n"+
-				"直接发送位置或坐标均可：\n\n"+
-				"• Telegram 附件 → 位置（最方便）\n"+
-				"• 文本坐标：<code>31.2304,121.4737</code>\n\n"+
-				"<i>顺序为纬度,经度（WGS84）。</i>")
 	case cmd == "adblock":
 		b.showAdBlock(ctx, v)
 	case cmd == "adblock_on":
@@ -509,18 +490,6 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 		}
 		b.showRules(ctx, v)
 
-	case "loc_set":
-		lat, lon, err := parseLatLon(text)
-		if err != nil {
-			b.render(ctx, v, errBox("格式错误", err), backTo("location"))
-			return
-		}
-		if err := b.Manager.SetLocation(lat, lon); err != nil {
-			b.render(ctx, v, errBox("设置失败", err), backTo("location"))
-			return
-		}
-		b.showLocation(ctx, v)
-
 	case "ad_allow":
 		if err := b.Manager.AllowAd(text); err != nil {
 			b.render(ctx, v, errBox("添加失败", err), backTo("adblock"))
@@ -572,9 +541,9 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 	b.render(ctx, v, sb.String(), inlineKeyboard(
 		[]btn{{"📊 运行状态", "status"}, {"📈 流量统计", "traffic"}},
 		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
-		[]btn{{"🛡 广告拦截", "adblock"}, {"📍 修改定位", "location"}},
-		[]btn{{"🩺 连通诊断", "ask_probe"}, {"📱 客户端接入", "client"}},
-		[]btn{{"🖥 内网面板", "panel"}, {"🚀 版本更新", "update"}},
+		[]btn{{"🛡 广告拦截", "adblock"}, {"🩺 连通诊断", "ask_probe"}},
+		[]btn{{"📱 客户端接入", "client"}, {"🖥 内网面板", "panel"}},
+		[]btn{{"🚀 版本更新", "update"}},
 	))
 }
 
@@ -728,141 +697,6 @@ func (b *Bot) doTestEgress(ctx context.Context, v view, name string) {
 		))
 }
 
-// parseLatLon 解析“纬度,经度”文本。
-func parseLatLon(s string) (float64, float64, error) {
-	f := strings.FieldsFunc(strings.TrimSpace(s), func(r rune) bool {
-		return r == ',' || r == '，' || r == ' ' || r == '\t'
-	})
-	if len(f) != 2 {
-		return 0, 0, fmt.Errorf("需要两个数字，形如 31.2304,121.4737")
-	}
-	lat, err := strconv.ParseFloat(f[0], 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("纬度 %q 不是数字", f[0])
-	}
-	lon, err := strconv.ParseFloat(f[1], 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("经度 %q 不是数字", f[1])
-	}
-	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
-		return 0, 0, fmt.Errorf("坐标超出范围")
-	}
-	return lat, lon, nil
-}
-
-// doLocationToggle 开关定位修改。首次开启会生成根 CA。
-func (b *Bot) doLocationToggle(ctx context.Context, v view, on bool) {
-	msg, err := b.Manager.SetLocationEnabled(on)
-	if err != nil {
-		b.render(ctx, v, errBox("操作失败", err), backTo("location"))
-		return
-	}
-	if !on {
-		b.render(ctx, v, "✅ "+html.EscapeString(msg), inlineKeyboard(
-			[]btn{{"📍 返回定位页", "location"}},
-			[]btn{{"« 返回主菜单", "menu"}},
-		))
-		return
-	}
-
-	st := b.Manager.LocationState()
-	var sb strings.Builder
-	sb.WriteString("✅ <b>定位修改已开启</b>\n\n")
-	sb.WriteString("<b>接下来请在手机上完成：</b>\n")
-	sb.WriteString("1️⃣ 删除旧的 5gpn 描述文件\n")
-	sb.WriteString("2️⃣ 点下方按钮重新获取并安装\n")
-	sb.WriteString("3️⃣ 设置 → 通用 → 关于本机 → 证书信任设置\n")
-	sb.WriteString("　　开启对「5gpn-NEXT」的<b>完全信任</b>\n")
-	sb.WriteString("4️⃣ 回来设置目标坐标\n\n")
-	if st.CAFingerprint != "" {
-		fmt.Fprintf(&sb, "<i>根证书指纹 <code>%s</code></i>",
-			html.EscapeString(truncateText(st.CAFingerprint, 32)))
-	}
-	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"📱 获取描述文件", "ios_dns_profile"}},
-		[]btn{{"📍 设置定位", "ask_loc_set"}},
-		[]btn{{"« 返回主菜单", "menu"}},
-	))
-}
-
-// showLocation 展示定位修改状态。
-func (b *Bot) showLocation(ctx context.Context, v view) {
-	st := b.Manager.LocationState()
-
-	var sb strings.Builder
-	sb.WriteString("📍 <b>修改定位</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-
-	if !st.Supported {
-		sb.WriteString("状态　<b>不可用</b>\n\n")
-		sb.WriteString("<blockquote>定位修改依赖 DoT 入口。\n")
-		sb.WriteString("请先启用 <code>android.enabled</code> 并重启服务。</blockquote>")
-		b.render(ctx, v, sb.String(), backTo("menu"))
-		return
-	}
-
-	if !st.Available {
-		sb.WriteString("状态　<b>已关闭</b>\n\n")
-		sb.WriteString("<blockquote>开启后可修改 iOS 的<b>网络定位</b>（WiFi/基站），\n")
-		sb.WriteString("不影响 GPS 硬件定位。\n\n")
-		sb.WriteString("⚠️ 需要手机信任网关根证书：\n")
-		sb.WriteString("网关只对 <code>gs-loc.apple.com</code> 解密，\n")
-		sb.WriteString("其余流量一律透传，白名单硬编码不可扩展。\n\n")
-		sb.WriteString("开启后需重新安装描述文件以安装根证书。</blockquote>")
-		b.render(ctx, v, sb.String(), inlineKeyboard(
-			[]btn{{"🟢 开启定位修改", "loc_on"}},
-			[]btn{{"« 返回主菜单", "menu"}},
-		))
-		return
-	}
-
-	if st.Active {
-		fmt.Fprintf(&sb, "状态　<b>已生效</b>\n坐标　<code>%.6f, %.6f</code>\n", st.Lat, st.Lon)
-		fmt.Fprintf(&sb, "已改写　<b>%d</b> 次", st.Rewrites)
-		if st.Failures > 0 {
-			fmt.Fprintf(&sb, "　失败 <b>%d</b> 次", st.Failures)
-		}
-		sb.WriteString("\n\n")
-
-		switch {
-		case st.Failures > 0 && st.LastError != "":
-			// 改写失败会原样透传（功能降级而非损坏），必须如实告知原因，
-			// 否则用户只能看到“次数为 0”却不知道为什么。
-			sb.WriteString("<blockquote>⚠️ <b>最近一次改写失败</b>\n<code>")
-			sb.WriteString(html.EscapeString(truncateText(st.LastError, 90)))
-			sb.WriteString("</code>\n失败时已原样透传，定位不受影响。</blockquote>\n\n")
-		case st.Rewrites == 0:
-			sb.WriteString("<blockquote>⚠️ 尚未发生改写。\n")
-			sb.WriteString("请确认：已关 Wi-Fi 走蜂窝数据、描述文件已重装且根证书已完全信任。\n")
-			sb.WriteString("iOS 26+ 还会缓存定位，设置后需<b>重启手机</b>。</blockquote>\n\n")
-		default:
-			sb.WriteString("<blockquote>✅ 改写已生效。若地图仍显示真实位置，\n")
-			sb.WriteString("请<b>重启手机</b>清空 locationd 缓存，并在<b>室内</b>测试\n")
-			sb.WriteString("（室外 GPS 信号强时系统优先信 GPS）。</blockquote>\n\n")
-		}
-	} else {
-		sb.WriteString("状态　<b>未设置</b>（使用真实定位）\n\n")
-	}
-
-	sb.WriteString("<blockquote>仅改写 <b>网络定位</b>（WiFi/基站），不影响 GPS 硬件定位。\n")
-	sb.WriteString("室内/WiFi 环境效果最好；室外 GPS 信号强时系统可能仍以 GPS 为准。\n")
-	sb.WriteString("网关只对 <code>gs-loc.apple.com</code> 解密，其余流量一律透传。</blockquote>")
-	if st.CAFingerprint != "" {
-		fmt.Fprintf(&sb, "\n\n<i>根证书指纹 <code>%s</code></i>", html.EscapeString(truncateText(st.CAFingerprint, 32)))
-	}
-
-	rows := [][]btn{{{"📍 设置定位", "ask_loc_set"}}}
-	if st.Active {
-		rows = append(rows, []btn{{"♻️ 恢复真实定位", "loc_clear"}})
-	}
-	rows = append(rows,
-		[]btn{{"📱 重新获取描述文件", "ios_dns_profile"}},
-		[]btn{{"🔴 关闭定位修改", "loc_off"}},
-		[]btn{{"🔄 刷新", "location"}, {"« 返回主菜单", "menu"}},
-	)
-	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
-}
-
 // showAdBlock 展示广告拦截状态与开关。
 func (b *Bot) showAdBlock(ctx context.Context, v view) {
 	st := b.Manager.Status(b.Version)
@@ -883,8 +717,7 @@ func (b *Bot) showAdBlock(ctx context.Context, v view) {
 	}
 	fmt.Fprintf(&sb, "白名单　<b>%d</b> 条\n\n", ad.Allowlist)
 
-	sb.WriteString("<blockquote>在网关侧拦截，全设备生效、无需安装 App。\n")
-	sb.WriteString("Relay 模式直接拒绝连接，DNS 模式返回 NXDOMAIN。\n")
+	sb.WriteString("<blockquote>在加密 DNS 入口返回 NXDOMAIN，全设备生效、无需安装 App。\n")
 	sb.WriteString("自定义分流规则优先级高于拦截，可随时覆盖。</blockquote>\n\n")
 	sb.WriteString("<i>若某 App 白屏/加载不出，把其域名加入白名单即可救急。</i>")
 
@@ -1183,7 +1016,7 @@ func (b *Bot) showAndroid(ctx context.Context, v view) {
 	if !g.Enabled {
 		sb.WriteString("当前未启用 Android 支持。\n\n")
 		sb.WriteString("开启方法：编辑 <code>/etc/5gpn-next/config.json</code>，\n")
-		sb.WriteString("把 <code>android.enabled</code> 设为 <code>true</code>，\n")
+		sb.WriteString("把 <code>dns.enabled</code> 设为 <code>true</code>，\n")
 		sb.WriteString("然后执行 <code>systemctl restart 5gpn-next</code>。")
 		b.render(ctx, v, sb.String(), backTo("client"))
 		return
@@ -1310,7 +1143,7 @@ func (b *Bot) doRollback(ctx context.Context, v view, tag string) {
 // sendDNSProfile 下发「蜂窝 DNS 模式」描述文件。
 func (b *Bot) sendDNSProfile(ctx context.Context, v view) {
 	if b.Manager.DNSProfileBytes == nil {
-		b.render(ctx, v, "<b>获取失败</b>\n\n蜂窝 DNS 模式需要启用 android.enabled（DoT 入口）。", backTo("client"))
+		b.render(ctx, v, "<b>获取失败</b>\n\n蜂窝 DNS 模式需要启用 dns.enabled（DoT 入口）。", backTo("client"))
 		return
 	}
 	data, err := b.Manager.DNSProfileBytes()
@@ -1320,11 +1153,11 @@ func (b *Bot) sendDNSProfile(ctx context.Context, v view) {
 	}
 
 	caption := "<b>iOS 蜂窝 DNS 描述文件</b>\n\n" +
-		"1. 先删除旧的 5gpn 描述文件（含 Relay 模式）\n" +
+		"1. 如已安装旧版 5gpn 描述文件，请先删除\n" +
 		"2. 点击上方文件并选择下载\n" +
 		"3. 打开 设置 → 通用 → VPN 与设备管理并安装\n\n" +
 		"<i>✅ 仅蜂窝数据生效，Wi-Fi 完全不受影响；国内 IP 手机本地直连。\n" +
-		"⚠️ 无 SNI 私有协议（如 WhatsApp 聊天）可能不兼容，遇到问题改用 Relay 模式。</i>"
+		"⚠️ 加密 DNS 无法识别少数无 SNI 私有协议，这是当前方案的明确边界。</i>"
 
 	if err := b.sendDocument(ctx, v.chatID, "5gpn-next-dns.mobileconfig", data, caption); err != nil {
 		b.render(ctx, v, errBox("发送失败", err), backTo("client"))

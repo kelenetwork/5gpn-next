@@ -1,7 +1,6 @@
-// Package dot 实现 Android 接入路径：DNS over TLS + A 记录改写。
+// Package dot 实现 iOS/Android 加密 DNS 接入：DNS over TLS + A 记录改写。
 //
-// 与 iOS 的 Relay 路径不同，Android 系统只提供「私密 DNS」一个入口，
-// 拿不到应用层目的地。因此这里沿用业界通行做法：
+// 系统加密 DNS 入口拿不到应用层目的地，因此这里采用：
 //
 //	国内域名  → 返回真实 IP，手机直连
 //	代理域名  → A 记录改写为网关自身 IP，流量因此回到网关，

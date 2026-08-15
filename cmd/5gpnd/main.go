@@ -22,7 +22,6 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/ingress/hint"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/sniff"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
-	"github.com/kelenetwork/5gpn-next/internal/mitm"
 	"github.com/kelenetwork/5gpn-next/internal/node"
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/probe"
@@ -72,7 +71,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`5gpn-NEXT — 基于 Apple Network Relay 的 NPN 网关
+	fmt.Print(`5gpn-NEXT — 手机免客户端的加密 DNS 分流网关
 
 用法:
   5gpnd run     -c <配置文件>            启动网关
@@ -150,7 +149,7 @@ func loadRuleSets(cfg *config.Config, eng *policy.Engine) error {
 			// 缓存优先：有缓存立即用，服务秒级起监听；
 			// 联网刷新由后台任务完成，不阻塞启动。
 			// 否则每次升级/重启都要现场下载几 MB 规则库，
-			// 期间 Relay 不在线，手机直接断网。
+			// 期间规则不完整，手机访问会出现错误分流。
 			if p, ok := f.Cached(rs.Name); ok {
 				src = p
 			} else {
@@ -270,6 +269,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	cleanupRetiredArtifacts(cfgPath)
 
 	var rec *jsonlRecorder
 	if a.cfg.LogPath != "" {
@@ -281,42 +281,25 @@ func cmdRun(args []string) error {
 		}
 	}
 
-	// 定位修改：Spoofer 总是创建（便于 Bot 随时开关），但 CA 延迟到
-	// 首次启用时才生成：未启用的部署不会凭空多出一张根证书，
-	// 也不下发证书、不拦截任何流量。
-	spoofer := mitm.New("/var/lib/5gpn-next/ca")
-	if a.cfg.Location.Enabled {
-		if err := spoofer.EnsureCA(); err != nil {
-			log.Printf("警告: 定位修改初始化失败: %v（功能不可用，其余正常）", err)
-		} else {
-			spoofer.SetEnabled(true)
-			if a.cfg.Location.HasFix {
-				if err := spoofer.SetLocation(a.cfg.Location.Lat, a.cfg.Location.Lon); err != nil {
-					log.Printf("警告: 定位坐标无效: %v", err)
-				}
-			}
-			log.Printf("定位修改已启用，根证书指纹 %s", spoofer.CAFingerprint())
-		}
-	}
-
 	// 蜂窝 DNS 描述文件：唯一的 iOS 接入方式。
 	// 沿用配置里原有的随机下载路径，保证已有安装链接不失效。
-	//
-	// 每次请求现场生成：在 Bot 里开启定位修改后，重新下载即含根证书，
-	// 无需重启服务。
-	profilePath := a.cfg.Relay.ProfilePath
-	if !a.cfg.Android.Enabled {
-		profilePath = ""
-	}
+	profilePath := a.cfg.Gateway.ProfilePath
 	buildProfile := func() ([]byte, error) {
-		o := profile.DefaultDNS(a.cfg.Relay.Host)
-		if a.cfg.Android.GatewayIP != "" {
-			o.ServerAddresses = []string{a.cfg.Android.GatewayIP}
-		}
-		if spoofer.HasCA() {
-			o.RootCADER = spoofer.CACertDER()
+		o := profile.DefaultDNS(a.cfg.Gateway.Host)
+		if a.cfg.DNS.GatewayIP != "" {
+			o.ServerAddresses = []string{a.cfg.DNS.GatewayIP}
 		}
 		return o.Build()
+	}
+	var profBytes []byte
+	if profilePath != "" && a.cfg.DNS.Enabled {
+		profBytes, err = buildProfile()
+		if err != nil {
+			return fmt.Errorf("生成 iOS 描述文件失败: %w", err)
+		}
+	}
+	if len(profBytes) == 0 {
+		profilePath = ""
 	}
 
 	// 运行态：策略引擎与出口注册表，热重载时原子替换指针。
@@ -344,10 +327,6 @@ func cmdRun(args []string) error {
 		return out
 	}
 	mgr.Stats = statsFunc(snapshot)
-	if profilePath != "" {
-		mgr.DNSProfileURL = fmt.Sprintf("https://%s:%d%s",
-			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), profilePath)
-	}
 	// 流量统计：只保留聚合数据，不落原始访问日志
 	traffic := stats.New("/var/lib/5gpn-next/traffic.json")
 	mgr.Traffic = traffic
@@ -360,17 +339,14 @@ func cmdRun(args []string) error {
 	mgr.Updater = updater
 
 	// 描述文件生成器：供 Bot 直接以文件形式下发
-	if a.cfg.Android.Enabled {
+	if a.cfg.DNS.Enabled {
 		mgr.DNSProfileBytes = buildProfile
 	}
-	// 定位修改控制面：注入后 Bot 才能开关并设置坐标。
-	// （v0.12.0 删除 Relay 时此行被误删，导致 Bot 显示“不可用”）
-	mgr.Location = spoofer
 	mgr.AndroidInfo = func() manage.AndroidGuide {
 		g := manage.AndroidGuide{
-			Enabled:   a.cfg.Android.Enabled,
-			DoTHost:   a.cfg.Relay.Host,
-			GatewayIP: a.cfg.Android.GatewayIP,
+			Enabled:   a.cfg.DNS.Enabled,
+			DoTHost:   a.cfg.Gateway.Host,
+			GatewayIP: a.cfg.DNS.GatewayIP,
 		}
 		if g.Enabled {
 			g.Note = "国内网站直连，国外网站经网关分流；无需安装任何应用。"
@@ -453,20 +429,19 @@ func cmdRun(args []string) error {
 		}
 		panelHandler = p.Handler()
 		log.Printf("内网面板已启用: https://%s:%d/（仅 %s 可访问）",
-			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), a.cfg.ClientCIDR)
+			a.cfg.Gateway.Host, portOf(a.cfg.Gateway.Listen), a.cfg.ClientCIDR)
 	}
 
-	// Android 接入路径：DoT + SNI/Host 嗅探
-	//
-	// 与 iOS 的 Relay 不同，Android 系统只有「私密 DNS」一个入口，
-	// 拿不到应用层目的地，只能靠 DNS 改写把流量引回网关再嗅探还原。
+	// iOS 与 Android 共用的加密 DNS 接入：DoT + SNI/Host 嗅探。
+	// 系统 DNS 入口拿不到应用层目的地，只能靠 DNS 改写把流量引回
+	// 网关，再从 SNI/Host 或 DNS 线索还原目标。
 	ingressCtx, ingressCancel := context.WithCancel(context.Background())
 	defer ingressCancel()
 
-	if a.cfg.Android.Enabled {
-		gwIP, perr := netip.ParseAddr(a.cfg.Android.GatewayIP)
+	if a.cfg.DNS.Enabled {
+		gwIP, perr := netip.ParseAddr(a.cfg.DNS.GatewayIP)
 		if perr != nil {
-			return fmt.Errorf("android.gateway_ip 无效: %w", perr)
+			return fmt.Errorf("dns.gateway_ip 无效: %w", perr)
 		}
 		clientPfx, perr := netip.ParsePrefix(a.cfg.ClientCIDR)
 		if perr != nil {
@@ -485,31 +460,25 @@ func cmdRun(args []string) error {
 			HintLookup: hints.Lookup,
 		}
 		sniffSrv = sn
-		// 定位修改在蜂窝 DNS 模式下同样可用：
-		// gs-loc.apple.com 不在 cn-domain 名单，会被 DoT 改写到网关，
-		// 流量落到 sniff 监听的 443，在那里从 SNI 还原域名后改写坐标。
-		if spoofer != nil {
-			sn.LocationSpoof = spoofer
-		}
 		go func() {
-			if e := sn.ListenAndServe(ingressCtx, a.cfg.Android.TLSListen, true); e != nil {
-				log.Printf("Android TLS 入口退出: %v", e)
+			if e := sn.ListenAndServe(ingressCtx, a.cfg.DNS.TLSListen, true); e != nil {
+				log.Printf("加密 DNS TLS 接管入口退出: %v", e)
 			}
 		}()
 		go func() {
-			if e := sn.ListenAndServe(ingressCtx, a.cfg.Android.HTTPListen, false); e != nil {
-				log.Printf("Android HTTP 入口退出: %v", e)
+			if e := sn.ListenAndServe(ingressCtx, a.cfg.DNS.HTTPListen, false); e != nil {
+				log.Printf("加密 DNS HTTP 接管入口退出: %v", e)
 			}
 		}()
 
 		ds := &dot.Server{
-			Listen:     a.cfg.Android.DoTListen,
+			Listen:     a.cfg.DNS.DoTListen,
 			GatewayIP:  gwIP,
 			OnRewrite:  hints.Add,
 			ClientCIDR: clientPfx,
-			Upstream:   a.cfg.Android.Upstream,
-			CertFile:   a.cfg.Relay.CertFile,
-			KeyFile:    a.cfg.Relay.KeyFile,
+			Upstream:   a.cfg.DNS.Upstream,
+			CertFile:   a.cfg.Gateway.CertFile,
+			KeyFile:    a.cfg.Gateway.KeyFile,
 			Policy:     rt.Policy,
 			OnDecision: func(_ string, action string) { dnsStats.record(action) },
 		}
@@ -527,7 +496,7 @@ func cmdRun(args []string) error {
 		tb := bot.New(a.cfg.Bot.Token, a.cfg.Bot.Admins, mgr, version)
 		if panelHandler != nil {
 			tb.PanelURL = fmt.Sprintf("https://%s:%d/",
-				a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
+				a.cfg.Gateway.Host, portOf(a.cfg.Gateway.Listen))
 		}
 		go tb.Run(botCtx)
 
@@ -581,24 +550,23 @@ func cmdRun(args []string) error {
 		}
 	}
 
-	// HTTPS 端点：描述文件下载、内网面板、运行状态。
-	// 删除 Relay 后不再需要处理 CONNECT，也不再有 PvD 端点。
+	// HTTPS 端点：描述文件下载、内网面板与运行状态。
 	root := &httpService{
 		ProfilePath:  profilePath,
-		ProfileBytes: buildProfile,
+		ProfileBytes: profBytes,
 		Panel:        panelHandler,
 		Stats:        snapshot,
 		Runtime:      rt,
 		Version:      version,
 	}
 
-	cert, err := tls.LoadX509KeyPair(a.cfg.Relay.CertFile, a.cfg.Relay.KeyFile)
+	cert, err := tls.LoadX509KeyPair(a.cfg.Gateway.CertFile, a.cfg.Gateway.KeyFile)
 	if err != nil {
 		return fmt.Errorf("加载证书失败: %w", err)
 	}
 
 	hs := &http.Server{
-		Addr:              a.cfg.Relay.Listen,
+		Addr:              a.cfg.Gateway.Listen,
 		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{
@@ -619,12 +587,31 @@ func cmdRun(args []string) error {
 	}()
 
 	log.Printf("5gpn-next %s 启动 listen=%s rules=%d egress=%v ipv6=%v",
-		version, a.cfg.Relay.Listen, a.engine.Len(), a.reg.Names(), a.engine.EgressHasV6())
+		version, a.cfg.Gateway.Listen, a.engine.Len(), a.reg.Names(), a.engine.EgressHasV6())
 
 	if err := hs.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// cleanupRetiredArtifacts 收尾已删除功能留下的本机状态。
+func cleanupRetiredArtifacts(cfgPath string) {
+	if changed, err := config.MigrateLegacyFile(cfgPath); err != nil {
+		log.Printf("警告: 旧版配置迁移失败: %v（继续使用内存中的兼容配置）", err)
+	} else if changed {
+		log.Printf("旧版配置已迁移为 gateway/dns schema")
+	}
+
+	const legacyCADir = "/var/lib/5gpn-next/ca"
+	if _, err := os.Lstat(legacyCADir); err != nil {
+		return
+	}
+	if err := os.RemoveAll(legacyCADir); err != nil {
+		log.Printf("警告: 清理退役定位 CA 失败: %v", err)
+		return
+	}
+	log.Printf("已清理退役定位功能的服务端 CA")
 }
 
 // ---------- probe ----------
@@ -657,13 +644,13 @@ func cmdProfile(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !cfg.Android.Enabled {
-		return fmt.Errorf("描述文件依赖 DoT 入口，请先启用 android.enabled")
+	if !cfg.DNS.Enabled {
+		return fmt.Errorf("描述文件依赖 DoT 入口，请先启用 dns.enabled")
 	}
 
-	o := profile.DefaultDNS(cfg.Relay.Host)
-	if cfg.Android.GatewayIP != "" {
-		o.ServerAddresses = []string{cfg.Android.GatewayIP}
+	o := profile.DefaultDNS(cfg.Gateway.Host)
+	if cfg.DNS.GatewayIP != "" {
+		o.ServerAddresses = []string{cfg.DNS.GatewayIP}
 	}
 	b, err := o.Build()
 	if err != nil {
@@ -676,21 +663,8 @@ func cmdProfile(args []string) error {
 	if err := os.WriteFile(out, b, 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("已生成 %s\n  DoT = %s:853\n  仅蜂窝数据启用，Wi-Fi 不受影响\n", out, cfg.Relay.Host)
+	fmt.Printf("已生成 %s\n  DoT = %s:853\n  仅蜂窝数据启用，Wi-Fi 不受影响\n", out, cfg.Gateway.Host)
 	return nil
-}
-
-// dnsProfilePathOf 由 Relay 描述文件路径派生 DNS 模式下载路径：
-// 复用同一随机目录（能力凭证），仅文件名不同。
-func dnsProfilePathOf(relayPath string) string {
-	if relayPath == "" {
-		return ""
-	}
-	i := strings.LastIndex(relayPath, "/")
-	if i < 0 {
-		return ""
-	}
-	return relayPath[:i+1] + "5gpn-next-dns.mobileconfig"
 }
 
 // ---------- 小工具 ----------
@@ -757,7 +731,7 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	fmt.Printf("配置有效: %s\n  监听=%s 出口=%d 规则=%d\n",
-		cfgPath, cfg.Relay.Listen, len(cfg.Egress), len(cfg.Rules))
+		cfgPath, cfg.Gateway.Listen, len(cfg.Egress), len(cfg.Rules))
 	return nil
 }
 

@@ -83,9 +83,8 @@ func TestMatchDomainRules(t *testing.T) {
 	}
 }
 
-// TestMatchBareIP 覆盖 P0 实测发现的硬约束：
-// iOS 会把裸 IP 直接交给网关（Twitter/Dropbox/XMPP 推送），
-// 这类流量绕不过手机侧 ExcludedDomains，必须靠 GEOIP 判定。
+// TestMatchBareIP 覆盖裸 IP 目标的硬约束：这类流量没有域名可匹配，
+// 必须靠 GEOIP 判定。
 func TestMatchBareIP(t *testing.T) {
 	e := newTestEngine(t)
 

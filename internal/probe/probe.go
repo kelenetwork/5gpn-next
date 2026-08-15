@@ -70,7 +70,7 @@ func (p *Prober) Run(ctx context.Context, target string) *trace.Trace {
 	tr := trace.New("probe", target, "local")
 
 	// [1] 入口
-	tr.Step(trace.StageIngress, trace.StatusOK, "probe 本地发起（跳过 Relay 鉴权）")
+	tr.Step(trace.StageIngress, trace.StatusOK, "probe 本地发起（跳过客户端接入）")
 
 	// [2] 策略
 	t, _ := policy.ParseTarget(target)

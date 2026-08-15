@@ -12,8 +12,7 @@ import (
 // gatewayRuntime 持有可热重载的策略引擎与出口注册表。
 //
 // 用原子指针整体替换，绝不复制含 sync.RWMutex 的结构体
-// （那会造成数据竞争）。原先这份职责在 relay.Server 上，
-// 删除 Relay 入口后独立出来，供 DoT 与 sniff 共用。
+// （那会造成数据竞争）；DoT 与 sniff 共用这一层运行态。
 type gatewayRuntime struct {
 	pol atomic.Pointer[policy.Engine]
 	eg  atomic.Pointer[egress.Registry]
@@ -29,7 +28,7 @@ func (g *gatewayRuntime) Egress() *egress.Registry { return g.eg.Load() }
 
 // statsFunc 把闭包适配为 manage.StatsSource。
 //
-// 计数器实际由 sniff.Server 持有，而它在 Android 入口分支里才创建；
+// 计数器实际由 sniff.Server 持有，而它在加密 DNS 入口分支里才创建；
 // 用闭包延迟读取，避免为了取数把整段初始化顺序打乱。
 type statsFunc func() map[string]int64
 
@@ -55,16 +54,12 @@ func (c *dnsCounters) record(action string) {
 	}
 }
 
-// httpService 提供 HTTPS 端点：描述文件下载、内网面板、运行状态。
-//
-// 删除 Relay 后这里不再需要处理 CONNECT，因此可以直接用标准
-// http.ServeMux 之外的简单分发（描述文件路径含随机串，不适合 mux 前缀匹配）。
+// httpService 提供 HTTPS 端点：描述文件下载、内网面板与运行状态。
+// 描述文件路径含随机串，不适合按固定前缀挂到 http.ServeMux。
 type httpService struct {
-	// ProfilePath 是蜂窝 DNS 描述文件下载端点；ProfileBytes 现场生成，
-	// 这样在 Bot 里开关定位修改后，重新下载即可拿到含/不含根证书的版本，
-	// 无需重启服务。
+	// ProfilePath / ProfileBytes 是蜂窝 DNS 描述文件下载端点
 	ProfilePath  string
-	ProfileBytes func() ([]byte, error)
+	ProfileBytes []byte
 
 	// Panel 是内网 Web 面板处理器（可为 nil）
 	Panel http.Handler
@@ -78,16 +73,10 @@ type httpService struct {
 func (h *httpService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 描述文件下载：iOS 下载时不带任何鉴权头，
 	// 路径含随机串本身即能力凭证。
-	if h.ProfilePath != "" && h.ProfileBytes != nil &&
-		r.Method == http.MethodGet && r.URL.Path == h.ProfilePath {
-		b, err := h.ProfileBytes()
-		if err != nil {
-			http.Error(w, "profile unavailable", http.StatusInternalServerError)
-			return
-		}
+	if h.ProfilePath != "" && r.Method == http.MethodGet && r.URL.Path == h.ProfilePath {
 		w.Header().Set("Content-Type", "application/x-apple-aspen-config")
 		w.Header().Set("Content-Disposition", `attachment; filename="5gpn-next.mobileconfig"`)
-		w.Write(b)
+		w.Write(h.ProfileBytes)
 		return
 	}
 

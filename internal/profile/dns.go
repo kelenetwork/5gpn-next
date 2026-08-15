@@ -8,9 +8,9 @@ import (
 // PayloadTypeDNS 是加密 DNS 载荷类型（iOS 14+）。
 const PayloadTypeDNS = "com.apple.dnsSettings.managed"
 
-// DNSOptions 生成「蜂窝 DNS 模式」描述文件。
+// DNSOptions 生成蜂窝加密 DNS 描述文件。
 //
-// 与 Relay 模式的关键差异：只改 DNS，不接管连接。
+// 描述文件只改 DNS，不建立 VPN 或中继连接。
 //   - 蜂窝：DoT 指向网关，国外域名 A 记录被改写到网关（由 dot 包完成），
 //     国内域名返回真实 IP，手机本地直连。
 //   - Wi-Fi：OnDemandRules 命中 Disconnect，完全使用 Wi-Fi 自身 DNS，
@@ -21,7 +21,7 @@ const PayloadTypeDNS = "com.apple.dnsSettings.managed"
 type DNSOptions struct {
 	// Host 是 DoT 服务器主机名，必须与网关 TLS 证书匹配。
 	Host string
-	// ServerAddresses 是 DoT 服务器 IP（通常为 android.gateway_ip）。
+	// ServerAddresses 是 DoT 服务器 IP（通常为 dns.gateway_ip）。
 	// 可为空：为空时系统按 Host 解析。
 	ServerAddresses []string
 
@@ -29,18 +29,11 @@ type DNSOptions struct {
 	DisplayName  string
 	Description  string
 
-	// RootCADER 非空时额外携带根证书 payload（定位修改用）。
-	//
-	// 下发后用户仍需在「设置 → 通用 → 关于本机 → 证书信任设置」里手动
-	// 开启完全信任；iOS 不允许描述文件自动获得根信任。
-	RootCADER []byte
-
 	// 稳定标识：同一网关的后续版本必须复用，避免 iOS 视为新配置。
 	ProfileIdentifier string
 	DNSIdentifier     string
 	ProfileUUID       string
 	DNSPayloadUUID    string
-	CAPayloadUUID     string
 }
 
 // DefaultDNS 返回填好稳定标识的默认参数。
@@ -103,24 +96,7 @@ func (o DNSOptions) Build() ([]byte, error) {
 	root.set("PayloadDescription", str(o.Description))
 	root.set("PayloadOrganization", str(o.Organization))
 	root.set("PayloadRemovalDisallowed", boolean(false))
-
-	content := array{dns}
-	if len(o.RootCADER) > 0 {
-		if o.CAPayloadUUID == "" {
-			o.CAPayloadUUID = deriveUUID("dns-ca-payload:" + o.Host)
-		}
-		ca := dict{}
-		ca.set("PayloadType", str("com.apple.security.root"))
-		ca.set("PayloadVersion", integer(1))
-		ca.set("PayloadIdentifier", str(o.ProfileIdentifier+".ca"))
-		ca.set("PayloadUUID", str(o.CAPayloadUUID))
-		ca.set("PayloadDisplayName", str("5gpn-NEXT 定位证书"))
-		ca.set("PayloadDescription", str("仅用于修改 Apple 网络定位；网关只对 gs-loc.apple.com 解密，其余流量一律透传。"))
-		ca.set("PayloadCertificateFileName", str("5gpn-next-ca.cer"))
-		ca.set("PayloadContent", data(o.RootCADER))
-		content = append(content, ca)
-	}
-	root.set("PayloadContent", content)
+	root.set("PayloadContent", array{dns})
 
 	var buf bytes.Buffer
 	buf.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")

@@ -1,13 +1,13 @@
 # 构建产物
 /bin/
 *.exe
-p0-relay
 5gpn-next
 /5gpnd
 
 # 凭据 / 本地状态（绝不入库）
-.p0-token
-.p0-profpath
+.kfc-secrets
+.node-link
+deploy/config.kfc.json
 remote-env
 *.mobileconfig
 *.pem

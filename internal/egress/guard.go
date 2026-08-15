@@ -109,8 +109,8 @@ func (g *FirstByteGuard) Close() error {
 // CloseWrite 透传半关闭。
 //
 // FirstByteGuard 只嵌入 net.Conn，CloseWrite 不会被自动提升；若不透传，
-// relay 隧道里的 `conn.(interface{ CloseWrite() error })` 断言会失败，
-// 上行结束时无法向上游发 FIN，部分服务端会一直等待请求结束（表现为长挂）。
+// 上层的 `conn.(interface{ CloseWrite() error })` 断言会失败，上行结束时
+// 无法向上游发 FIN，部分服务端会一直等待请求结束（表现为长挂）。
 func (g *FirstByteGuard) CloseWrite() error {
 	if cw, ok := g.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()

@@ -98,8 +98,8 @@ func isIPv6Literal(addr string) bool {
 
 // guardIPv6 在出口无 v6 能力时对 IPv6 字面量目标快速失败。
 //
-// 这是 P0 实测得到的硬约束：iOS 会主动把 IPv6 字面量交给 Relay，
-// 若不快速失败，Happy Eyeballs 无法及时回落，App 会报"无网络连接"。
+// 客户端可能优先尝试 IPv6 字面量；若出口没有 IPv6 却不快速失败，
+// Happy Eyeballs 无法及时回落，App 会报“无网络连接”。
 func guardIPv6(addr string, hasV6 bool) error {
 	if hasV6 {
 		return nil
@@ -272,8 +272,8 @@ func socks5Handshake(c net.Conn, target string) error {
 //
 // ⚠️ 只看 SOCKS 应答会得到假阳性：mihomo 收到 CONNECT 后会**先乐观回复
 // 成功**，再去连上游；上游不可达时不回错误，连接静默挂死。生产实测中
-// hinet 因此被误判为有 IPv6，导致 Relay 把手机流量灌进一条从未建立的
-// 连接（表现为 up=517B down=0B 挂 30 秒）。
+// hinet 因此曾被误判为有 IPv6，导致手机流量进入一条从未建立的连接
+// （表现为 up=517B down=0B 挂 30 秒）。
 //
 // 因此必须做端到端验证：完成一次真实 TLS 握手，证明**双向**有数据流动。
 func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {

@@ -30,29 +30,6 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/update"
 )
 
-// LocationController 是定位修改的控制面。
-//
-// 由 cmd 层注入 mitm.Spoofer；关闭功能时为 nil，manage 层不依赖具体实现。
-type LocationController interface {
-	Enabled() bool
-	Active() bool
-	Location() (lat, lon float64, ok bool)
-	SetLocation(lat, lon float64) error
-	ClearLocation()
-	Rewrites() uint64
-	CAFingerprint() string
-	// SetEnabled 开关功能；EnsureCA 在首次启用时生成根证书。
-	SetEnabled(bool)
-	EnsureCA() error
-	HasCA() bool
-	// Failures / LastError 暴露改写失败情况。
-	//
-	// 解析失败时会原样透传（功能降级而非损坏），若不单独暴露，
-	// 用户只能看到「次数为 0」却不知原因。
-	Failures() uint64
-	LastError() string
-}
-
 // StatsSource 提供运行时计数。
 type StatsSource interface {
 	Snapshot() map[string]int64
@@ -68,11 +45,6 @@ type Manager struct {
 	Egress     *egress.Registry
 	Stats      StatsSource
 
-	// ProfileURL 是 Relay 描述文件下载地址，供前端展示
-	ProfileURL string
-	// DNSProfileURL 是「蜂窝 DNS 模式」描述文件下载地址（可为空）
-	DNSProfileURL string
-
 	// Reload 由主程序注入：配置变更后重建策略与出口，
 	// 返回新的运行态由 Manager 自行装配。
 	// 注入的函数绝不能回调 Manager 的加锁方法（会死锁）。
@@ -84,13 +56,8 @@ type Manager struct {
 	// Updater 负责版本检查/升级/回退（可为空）
 	Updater *update.Manager
 
-	// ProfileBytes 返回当前 iOS Relay 描述文件内容，供 Bot 以文件形式下发
-	ProfileBytes func() ([]byte, error)
-	// DNSProfileBytes 返回「蜂窝 DNS 模式」描述文件；未启用 DoT 时为 nil
+	// DNSProfileBytes 返回蜂窝 DNS 描述文件；未启用 DoT 时为 nil。
 	DNSProfileBytes func() ([]byte, error)
-
-	// Location 提供定位修改能力；功能关闭时为 nil。
-	Location LocationController
 
 	// AndroidInfo 返回 Android 接入所需信息
 	AndroidInfo func() AndroidGuide
@@ -202,8 +169,8 @@ func (m *Manager) Status(version string) Status {
 	st := Status{
 		Version:       version,
 		Uptime:        humanDuration(time.Since(m.started)),
-		Listen:        cfg.Relay.Listen,
-		Host:          cfg.Relay.Host,
+		Listen:        cfg.Gateway.Listen,
+		Host:          cfg.Gateway.Host,
 		Rules:         eng.Len(),
 		Egress:        es,
 		Final:         effectiveFinal,
@@ -218,7 +185,7 @@ func (m *Manager) Status(version string) Status {
 	if m.Stats != nil {
 		st.Counters = m.Stats.Snapshot()
 	}
-	if t := certNotAfter(cfg.Relay.CertFile); t != "" {
+	if t := certNotAfter(cfg.Gateway.CertFile); t != "" {
 		st.CertUntil = t
 	}
 	return st
@@ -637,109 +604,6 @@ func (m *Manager) ensureDomesticRules(ctx context.Context) error {
 		return fmt.Errorf("cn-domain / geoip:cn 内容为空或解析失败")
 	}
 	return nil
-}
-
-// ---------- 定位修改 ----------
-
-// LocationStatus 是定位修改状态快照。
-type LocationStatus struct {
-	// Supported 表示网关具备该能力（DoT 入口已启用）
-	Supported bool `json:"supported"`
-	// Available 表示功能开关处于开启状态
-	Available bool `json:"available"`
-	// Active 表示已设置坐标、正在改写
-	Active bool    `json:"active"`
-	Lat    float64 `json:"lat,omitempty"`
-	Lon    float64 `json:"lon,omitempty"`
-	// Rewrites 是累计改写次数，用于确认功能真的生效
-	Rewrites uint64 `json:"rewrites"`
-	// Failures 是改写失败次数（失败时原样透传）
-	Failures uint64 `json:"failures"`
-	// LastError 是最近一次失败原因；成功后清空
-	LastError string `json:"last_error,omitempty"`
-	// CAFingerprint 供用户核对所信任的根证书
-	CAFingerprint string `json:"ca_fingerprint,omitempty"`
-}
-
-// LocationState 返回定位修改状态。
-func (m *Manager) LocationState() LocationStatus {
-	if m.Location == nil {
-		return LocationStatus{}
-	}
-	lat, lon, ok := m.Location.Location()
-	return LocationStatus{
-		Supported:     true,
-		Available:     m.Location.Enabled(),
-		Active:        ok,
-		Lat:           lat,
-		Lon:           lon,
-		Rewrites:      m.Location.Rewrites(),
-		Failures:      m.Location.Failures(),
-		LastError:     m.Location.LastError(),
-		CAFingerprint: m.Location.CAFingerprint(),
-	}
-}
-
-// SetLocationEnabled 开关定位修改。
-//
-// 首次开启会生成根 CA（一次性，10 年有效），无需重启服务；
-// 但描述文件需要重新安装才能把根证书带给手机。
-func (m *Manager) SetLocationEnabled(on bool) (string, error) {
-	if m.Location == nil {
-		return "", fmt.Errorf("定位修改不可用（需启用 android.enabled 的 DoT 入口）")
-	}
-	if m.Location.Enabled() == on {
-		if on {
-			return "定位修改已是开启状态", nil
-		}
-		return "定位修改已是关闭状态", nil
-	}
-
-	if on {
-		// 先确保根证书就绪，否则会出现“显示已开启但根本不能改写”的假成功
-		if err := m.Location.EnsureCA(); err != nil {
-			return "", fmt.Errorf("生成根证书失败: %w", err)
-		}
-	}
-	m.Location.SetEnabled(on)
-
-	m.mu.Lock()
-	m.Cfg.Location.Enabled = on
-	err := m.saveAndReloadLocked()
-	m.mu.Unlock()
-	if err != nil {
-		return "", err
-	}
-	if !on {
-		return "定位修改已关闭（流量恢复完全透传）", nil
-	}
-	return "定位修改已开启，请重新安装描述文件以安装根证书", nil
-}
-
-// SetLocation 设置目标坐标并持久化。
-func (m *Manager) SetLocation(lat, lon float64) error {
-	if m.Location == nil {
-		return fmt.Errorf("定位修改未启用（需在配置中开启 location.enabled 并重启）")
-	}
-	if err := m.Location.SetLocation(lat, lon); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Cfg.Location.Lat, m.Cfg.Location.Lon, m.Cfg.Location.HasFix = lat, lon, true
-	return m.saveAndReloadLocked()
-}
-
-// ClearLocation 恢复真实定位。
-func (m *Manager) ClearLocation() error {
-	if m.Location == nil {
-		return fmt.Errorf("定位修改未启用")
-	}
-	m.Location.ClearLocation()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Cfg.Location.HasFix = false
-	return m.saveAndReloadLocked()
 }
 
 // ---------- 广告拦截 ----------

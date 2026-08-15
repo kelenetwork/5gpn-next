@@ -18,8 +18,8 @@ import (
 
 // Config 是完整配置。
 type Config struct {
-	// Relay 入口
-	Relay RelayConfig `json:"relay"`
+	// Gateway 是 HTTPS 管理端点与证书配置。
+	Gateway GatewayConfig `json:"gateway"`
 
 	// 出口列表
 	Egress []EgressConfig `json:"egress"`
@@ -33,14 +33,8 @@ type Config struct {
 	// 规则集订阅
 	RuleSets []RuleSetConfig `json:"rulesets"`
 
-	// 手机侧直连域名（写进描述文件 ExcludedDomains）
-	ExcludedDomains []string `json:"excluded_domains"`
-
 	// AdBlock 是广告/追踪拦截配置。
 	AdBlock AdBlockConfig `json:"ad_block"`
-
-	// Location 是定位修改配置。
-	Location LocationConfig `json:"location"`
 
 	// PreferIPv4 让所有出口对 IPv6 字面量目标立即快速失败（0ms），
 	// 促使客户端 Happy Eyeballs 直接改用 IPv4。
@@ -61,8 +55,8 @@ type Config struct {
 	// 客户端来源网段（用于面板访问控制与 DNS 改写判定）
 	ClientCIDR string `json:"client_cidr"`
 
-	// Android 接入路径（DoT + SNI 嗅探）
-	Android AndroidConfig `json:"android"`
+	// DNS 是 iOS 蜂窝加密 DNS 与 Android 私人 DNS 共用的接入路径。
+	DNS DNSConfig `json:"dns"`
 
 	// 自动更新检查
 	Update UpdateConfig `json:"update"`
@@ -71,11 +65,11 @@ type Config struct {
 	LogPath string `json:"log_path"`
 }
 
-// AndroidConfig 是 Android 接入配置。
+// DNSConfig 是 iOS 与 Android 共用的加密 DNS 接入配置。
 //
-// Android 只提供「私密 DNS」一个入口，拿不到应用层目的地，
-// 因此必须靠 DNS 改写 + SNI/Host 嗅探还原目标。
-type AndroidConfig struct {
+// 系统加密 DNS 入口拿不到应用层目的地，因此必须靠 DNS 改写与
+// SNI/Host 嗅探还原目标。
+type DNSConfig struct {
 	// Enabled 为 false 时完全不监听 DoT 与嗅探端口
 	Enabled bool `json:"enabled"`
 	// DoTListen 通常为 ":853"
@@ -115,14 +109,13 @@ type PanelConfig struct {
 	Token string `json:"token"`
 }
 
-// RelayConfig 是 Relay 入口配置。
-type RelayConfig struct {
+// GatewayConfig 是 HTTPS 管理端点配置。
+type GatewayConfig struct {
 	Listen   string `json:"listen"` // 例如 ":20443"
 	Host     string `json:"host"`   // 证书主机名，例如 kfc.ke1e.de
 	CertFile string `json:"cert_file"`
 	KeyFile  string `json:"key_file"`
-	Token    string `json:"token"`
-	// ProfilePath 是描述文件下载路径（含随机串）
+	// ProfilePath 是 iOS 描述文件下载路径（含随机串）。
 	ProfilePath string `json:"profile_path"`
 }
 
@@ -144,9 +137,7 @@ type EgressConfig struct {
 
 // AdBlockConfig 控制广告拦截。
 //
-// 拦截在网关侧完成，全设备生效且无需安装任何 App：
-//   - Relay 模式：CONNECT 直接返回 403，App 秒失败不转圈
-//   - DNS 模式：返回 NXDOMAIN，更彻底
+// 拦截在加密 DNS 入口返回 NXDOMAIN，全设备生效且无需安装任何 App。
 type AdBlockConfig struct {
 	// Enabled 为 false 时完全不加载规则集，不占内存与带宽。
 	Enabled bool `json:"enabled"`
@@ -215,23 +206,6 @@ func (c *Config) EffectiveRuleSets() []RuleSetConfig {
 	})
 }
 
-// LocationConfig 控制 Apple 网络定位修改。
-//
-// 原理：手机把扫到的 WiFi/基站上报给 gs-loc.apple.com，它返回坐标；
-// 网关对该域名（且仅该域名）做 TLS 终止并改写响应。
-//
-// ⚠️ 需要手机信任网关签发的根证书；默认关闭，关闭时不生成 CA、
-// 不下发证书、不拦截任何流量。
-type LocationConfig struct {
-	// Enabled 开关功能。
-	Enabled bool `json:"enabled"`
-	// Lat / Lon 是目标坐标；HasFix 为 false 时不改写（真实定位）。
-	Lat float64 `json:"lat,omitempty"`
-	Lon float64 `json:"lon,omitempty"`
-	// HasFix 表示已设置目标坐标。
-	HasFix bool `json:"has_fix,omitempty"`
-}
-
 // RuleSetConfig 是一个规则集来源。
 type RuleSetConfig struct {
 	Name string `json:"name"`
@@ -246,7 +220,7 @@ type RuleSetConfig struct {
 // Default 返回可直接运行的默认配置。
 func Default() *Config {
 	return &Config{
-		Relay: RelayConfig{
+		Gateway: GatewayConfig{
 			Listen: ":20443",
 		},
 		Egress: []EgressConfig{
@@ -259,8 +233,8 @@ func Default() *Config {
 		PreferIPv4: boolPtr(true),
 		ClientCIDR: "172.22.0.0/16",
 		Panel:      PanelConfig{Enabled: true},
-		Android: AndroidConfig{
-			// 默认启用：Android 与 iOS 一并支持，用户无需额外选择
+		DNS: DNSConfig{
+			// 默认启用：iOS 与 Android 一并支持，用户无需额外选择。
 			Enabled:    true,
 			DoTListen:  ":853",
 			HTTPListen: ":80",
@@ -346,6 +320,29 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(b, c); err != nil {
 		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
+
+	// 兼容 v0.12 及更早版本：当时 HTTPS 端点叫 relay，
+	// iOS/Android 共用的 DNS 入口叫 android。新配置统一写 gateway/dns；
+	// 旧键只在读取时迁移，下一次保存便自然消失。
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(b, &keys); err != nil {
+		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
+	}
+	if _, ok := keys["gateway"]; !ok {
+		if raw, legacy := keys["relay"]; legacy {
+			if err := json.Unmarshal(raw, &c.Gateway); err != nil {
+				return nil, fmt.Errorf("解析旧版 relay 配置失败: %w", err)
+			}
+		}
+	}
+	if _, ok := keys["dns"]; !ok {
+		if raw, legacy := keys["android"]; legacy {
+			if err := json.Unmarshal(raw, &c.DNS); err != nil {
+				return nil, fmt.Errorf("解析旧版 android 配置失败: %w", err)
+			}
+		}
+	}
+
 	c.Rules = stripBuiltin(c.Rules)
 	// 迁移：旧版本无节点安装时 final 写成悬空的 "proxy"（无目标出口名），
 	// 语义上等于本机直出，归一为 "direct"，让 DIRECT 正确显示为当前出口。
@@ -353,6 +350,36 @@ func Load(path string) (*Config, error) {
 		c.Final = "direct"
 	}
 	return c, c.Validate()
+}
+
+// MigrateLegacyFile 把旧版配置原子改写为当前 schema。
+// 返回 changed=false 表示文件已经没有退役字段。
+func MigrateLegacyFile(path string) (changed bool, err error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(b, &keys); err != nil {
+		return false, fmt.Errorf("解析 %s 失败: %w", path, err)
+	}
+	for _, key := range []string{"relay", "android", "location", "excluded_domains"} {
+		if _, ok := keys[key]; ok {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	c, err := Load(path)
+	if err != nil {
+		return false, err
+	}
+	if err := c.Save(path); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Save 原子写入配置。
@@ -398,11 +425,11 @@ func WriteFileSandboxSafe(path string, data []byte, mode os.FileMode) error {
 
 // Validate 做基本校验。
 func (c *Config) Validate() error {
-	if c.Relay.Listen == "" {
-		return fmt.Errorf("relay.listen 不能为空")
+	if c.Gateway.Listen == "" {
+		return fmt.Errorf("gateway.listen 不能为空")
 	}
-	if c.Relay.CertFile == "" || c.Relay.KeyFile == "" {
-		return fmt.Errorf("relay.cert_file / relay.key_file 不能为空")
+	if c.Gateway.CertFile == "" || c.Gateway.KeyFile == "" {
+		return fmt.Errorf("gateway.cert_file / gateway.key_file 不能为空")
 	}
 	seen := map[string]bool{}
 	for _, e := range c.Egress {
@@ -430,12 +457,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("已配置 bot.token 但 bot.admins 为空，Bot 将不响应任何人")
 	}
 
-	if c.Android.Enabled {
-		if c.Android.GatewayIP == "" {
-			return fmt.Errorf("已启用 Android 支持但 android.gateway_ip 为空")
+	if c.DNS.Enabled {
+		if c.DNS.GatewayIP == "" {
+			return fmt.Errorf("已启用加密 DNS 接入但 dns.gateway_ip 为空")
 		}
-		if net.ParseIP(c.Android.GatewayIP) == nil {
-			return fmt.Errorf("android.gateway_ip %q 不是合法 IP", c.Android.GatewayIP)
+		if net.ParseIP(c.DNS.GatewayIP) == nil {
+			return fmt.Errorf("dns.gateway_ip %q 不是合法 IP", c.DNS.GatewayIP)
 		}
 	}
 	if strings.HasPrefix(c.Final, "proxy:") {
