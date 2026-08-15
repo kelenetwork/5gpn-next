@@ -28,6 +28,11 @@ type FirstByteGuard struct {
 	net.Conn
 	timeout time.Duration
 
+	// OnTimeout 在上游静默超时（判定为坏目标）时回调，可为 nil。
+	OnTimeout func()
+	// OnFirstByte 在收到首个下行字节（判定为可用目标）时回调，可为 nil。
+	OnFirstByte func()
+
 	gotFirst atomic.Bool
 	timedOut atomic.Bool
 
@@ -57,6 +62,9 @@ func (g *FirstByteGuard) Read(p []byte) (int, error) {
 	n, err := g.Conn.Read(p)
 	if n > 0 && g.gotFirst.CompareAndSwap(false, true) {
 		g.disarm()
+		if g.OnFirstByte != nil {
+			g.OnFirstByte()
+		}
 	}
 	return n, err
 }
@@ -75,6 +83,9 @@ func (g *FirstByteGuard) arm() {
 			return
 		}
 		g.timedOut.Store(true)
+		if g.OnTimeout != nil {
+			g.OnTimeout()
+		}
 		// 关闭底层连接：两侧 io.Copy 随即返回，隧道整体收敛
 		_ = g.Conn.Close()
 	})

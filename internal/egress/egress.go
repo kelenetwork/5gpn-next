@@ -32,6 +32,9 @@ type Dialer interface {
 // ErrNoIPv6 表示出口不具备 IPv6 能力，应让客户端快速回落 IPv4。
 var ErrNoIPv6 = errors.New("出口无 IPv6 能力")
 
+// ErrRecentlyDead 表示目标最近被确认无响应，本次直接快速失败。
+var ErrRecentlyDead = errors.New("目标最近无响应")
+
 // ---------- 本机直出 ----------
 
 // Direct 是本机直出出口。
@@ -112,6 +115,9 @@ type Socks5 struct {
 	addr   string
 	hasV6  bool
 	dialer *net.Dialer
+	// bad 记录最近确认无响应的目标（如部分不可达的 Meta edge），
+	// 后续连接直接快速失败，避免 App 逐个坏地址重复等待。
+	bad *badCache
 }
 
 // NewSocks5 构造 SOCKS5 出口。hasV6 由运维声明或探测得出。
@@ -121,6 +127,7 @@ func NewSocks5(name, addr string, hasV6 bool) *Socks5 {
 		addr:   addr,
 		hasV6:  hasV6,
 		dialer: &net.Dialer{Timeout: DialTimeout, KeepAlive: 30 * time.Second},
+		bad:    newBadCache(),
 	}
 }
 
@@ -133,6 +140,13 @@ func (s *Socks5) DialContext(ctx context.Context, network, addr string) (net.Con
 	if err := guardIPv6(addr, s.hasV6); err != nil {
 		return nil, err
 	}
+	// 最近确认无响应的目标直接快速失败：Meta 这类服务有大量 edge IP，
+	// 出口对其往往只是部分可达；若每个坏地址都要重新等满看门狗超时，
+	// App 轮询完一轮仍需几十秒（用户实测）。
+	if s.bad != nil && s.bad.bad(addr) {
+		return nil, fmt.Errorf("%w: %s（最近无响应）", ErrRecentlyDead, addr)
+	}
+
 	c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
 		return nil, fmt.Errorf("连接 SOCKS5 上游 %s 失败: %w", s.addr, err)
@@ -144,7 +158,19 @@ func (s *Socks5) DialContext(ctx context.Context, network, addr string) (net.Con
 	// mihomo 会先乐观回复 CONNECT 成功再去连上游，上游不可达时静默挂死。
 	// 用首字节看门狗兜底：客户端发数据后上游久无响应即断开，
 	// 促使 App 快速改试下一个地址（WhatsApp 轮询多个 Meta edge 的关键）。
-	return NewFirstByteGuard(c, FirstByteTimeout), nil
+	g := NewFirstByteGuard(c, FirstByteTimeout)
+	target := addr
+	g.OnTimeout = func() {
+		if s.bad != nil {
+			s.bad.mark(target)
+		}
+	}
+	g.OnFirstByte = func() {
+		if s.bad != nil {
+			s.bad.clear(target)
+		}
+	}
+	return g, nil
 }
 
 // socks5Handshake 执行无认证 SOCKS5 CONNECT。
