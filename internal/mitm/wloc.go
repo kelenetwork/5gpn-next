@@ -53,6 +53,7 @@ func RewriteResponse(body []byte, lat, lon float64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	origPBLen := len(body) - off
 	rewritten, n, err := rewriteMessage(body[off:], lat, lon, 0)
 	if err != nil {
 		return nil, err
@@ -63,7 +64,35 @@ func RewriteResponse(body []byte, lat, lon float64) ([]byte, error) {
 
 	out := make([]byte, 0, off+len(rewritten))
 	out = append(out, body[:off]...)
-	return append(out, rewritten...), nil
+	out = append(out, rewritten...)
+
+	// 回写 header 里的 protobuf 长度。
+	//
+	// Apple 响应形如：00 01 00 00 00 01 00 00 00 86 | <protobuf 134 字节>
+	//                                        ↑ 大端长度字段
+	// 改写后长度会变（未知位置的 -180 是 10 字节 varint，真实坐标只要 5 字节），
+	// 不同步更新则 iOS 按旧长度读取会解析失败并丢弃响应，
+	// 表现为“改写成功但定位不变”并伴随密集重试。
+	patchHeaderLength(out, off, origPBLen, len(rewritten))
+	return out, nil
+}
+
+// patchHeaderLength 把 header 末尾的长度字段改为新的 protobuf 长度。
+//
+// 实测 Apple 响应头为 10 字节，末尾 4 字节大端即 protobuf 长度：
+//
+//	00 01 00 00 00 01 00 00 00 86 | <protobuf 134 字节>
+//	                     ^^^^^^^^^^^ 大端 134
+//
+// 只有当原值确实等于原 protobuf 长度时才改写；否则说明头部布局
+// 与预期不符，此时保持原样——改错头部比不改更糟。
+func patchHeaderLength(out []byte, off, origLen, newLen int) {
+	if origLen == newLen || off < 4 {
+		return
+	}
+	if binary.BigEndian.Uint32(out[off-4:off]) == uint32(origLen) {
+		binary.BigEndian.PutUint32(out[off-4:off], uint32(newLen))
+	}
 }
 
 // findProtobufStart 定位 protobuf 正文起点。

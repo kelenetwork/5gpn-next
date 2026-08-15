@@ -45,6 +45,12 @@ type LocationController interface {
 	SetEnabled(bool)
 	EnsureCA() error
 	HasCA() bool
+	// Failures / LastError 暴露改写失败情况。
+	//
+	// 解析失败时会原样透传（功能降级而非损坏），若不单独暴露，
+	// 用户只能看到「次数为 0」却不知原因。
+	Failures() uint64
+	LastError() string
 }
 
 // StatsSource 提供运行时计数。
@@ -647,6 +653,10 @@ type LocationStatus struct {
 	Lon    float64 `json:"lon,omitempty"`
 	// Rewrites 是累计改写次数，用于确认功能真的生效
 	Rewrites uint64 `json:"rewrites"`
+	// Failures 是改写失败次数（失败时原样透传）
+	Failures uint64 `json:"failures"`
+	// LastError 是最近一次失败原因；成功后清空
+	LastError string `json:"last_error,omitempty"`
 	// CAFingerprint 供用户核对所信任的根证书
 	CAFingerprint string `json:"ca_fingerprint,omitempty"`
 }
@@ -664,6 +674,8 @@ func (m *Manager) LocationState() LocationStatus {
 		Lat:           lat,
 		Lon:           lon,
 		Rewrites:      m.Location.Rewrites(),
+		Failures:      m.Location.Failures(),
+		LastError:     m.Location.LastError(),
 		CAFingerprint: m.Location.CAFingerprint(),
 	}
 }

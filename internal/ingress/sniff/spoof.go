@@ -13,7 +13,12 @@ import (
 type LocationSpoofer interface {
 	Active() bool
 	Handles(host string) bool
-	Serve(client, upstream net.Conn, host string) error
+	// Serve 返回本次会话内成功改写的响应数。
+	//
+	// n == 0 且 err == nil 表示「TLS 终止成功但坐标未被改写」
+	// （解析失败时原样透传，功能降级而非损坏）。调用方必须据此
+	// 如实上报，不得统一报「改写完成」——那会让用户误以为已生效。
+	Serve(client, upstream net.Conn, host string) (int, error)
 }
 
 // bufferedConn 让 TLS 层能读到已被 bufio 预读的首包字节。

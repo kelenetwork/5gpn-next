@@ -818,10 +818,27 @@ func (b *Bot) showLocation(ctx context.Context, v view) {
 
 	if st.Active {
 		fmt.Fprintf(&sb, "状态　<b>已生效</b>\n坐标　<code>%.6f, %.6f</code>\n", st.Lat, st.Lon)
-		fmt.Fprintf(&sb, "已改写　<b>%d</b> 次\n\n", st.Rewrites)
-		if st.Rewrites == 0 {
-			sb.WriteString("<blockquote>⚠️ 尚未发生改写。iOS 26+ 会缓存定位，\n")
-			sb.WriteString("设置后需<b>重启手机</b>才会重新发起定位请求。</blockquote>\n\n")
+		fmt.Fprintf(&sb, "已改写　<b>%d</b> 次", st.Rewrites)
+		if st.Failures > 0 {
+			fmt.Fprintf(&sb, "　失败 <b>%d</b> 次", st.Failures)
+		}
+		sb.WriteString("\n\n")
+
+		switch {
+		case st.Failures > 0 && st.LastError != "":
+			// 改写失败会原样透传（功能降级而非损坏），必须如实告知原因，
+			// 否则用户只能看到“次数为 0”却不知道为什么。
+			sb.WriteString("<blockquote>⚠️ <b>最近一次改写失败</b>\n<code>")
+			sb.WriteString(html.EscapeString(truncateText(st.LastError, 90)))
+			sb.WriteString("</code>\n失败时已原样透传，定位不受影响。</blockquote>\n\n")
+		case st.Rewrites == 0:
+			sb.WriteString("<blockquote>⚠️ 尚未发生改写。\n")
+			sb.WriteString("请确认：已关 Wi-Fi 走蜂窝数据、描述文件已重装且根证书已完全信任。\n")
+			sb.WriteString("iOS 26+ 还会缓存定位，设置后需<b>重启手机</b>。</blockquote>\n\n")
+		default:
+			sb.WriteString("<blockquote>✅ 改写已生效。若地图仍显示真实位置，\n")
+			sb.WriteString("请<b>重启手机</b>清空 locationd 缓存，并在<b>室内</b>测试\n")
+			sb.WriteString("（室外 GPS 信号强时系统优先信 GPS）。</blockquote>\n\n")
 		}
 	} else {
 		sb.WriteString("状态　<b>未设置</b>（使用真实定位）\n\n")

@@ -29,6 +29,22 @@ type Spoofer struct {
 	hasLoc  bool
 
 	rewrites uint64
+	failures uint64
+	lastErr  string
+}
+
+// Failures 返回改写失败次数。
+func (s *Spoofer) Failures() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.failures
+}
+
+// LastError 返回最近一次改写失败原因（成功后清空）。
+func (s *Spoofer) LastError() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastErr
 }
 
 // New 构造 Spoofer；CA 延迟生成（见 EnsureCA）。
@@ -143,26 +159,28 @@ const mitmTimeout = 15 * time.Second
 // Serve 在客户端连接上终止 TLS，把请求转发到真实服务器，
 // 并改写响应中的坐标。
 //
-// 失败时返回错误，调用方应直接关闭连接：此时客户端会重试，
-// 系统退回真实定位，不会造成断网。
-func (s *Spoofer) Serve(client, upstream net.Conn, host string) error {
+// 返回本次会话内成功改写的响应数。注意：err == nil 不等于改写成功
+// —— 解析失败时会原样透传（功能降级而非损坏），此时 n == 0，
+// 调用方必须据此如实上报，不得统一报“改写完成”。
+func (s *Spoofer) Serve(client, upstream net.Conn, host string) (int, error) {
 	if !Allowed(host) {
-		return fmt.Errorf("主机 %q 不在白名单内", host)
+		return 0, fmt.Errorf("主机 %q 不在白名单内", host)
 	}
 	lat, lon, ok := s.Location()
 	if !ok {
-		return fmt.Errorf("未设置目标坐标")
+		return 0, fmt.Errorf("未设置目标坐标")
 	}
 	s.mu.RLock()
 	ca := s.ca
 	s.mu.RUnlock()
 	if ca == nil {
-		return fmt.Errorf("根证书未就绪")
+		return 0, fmt.Errorf("根证书未就绪")
 	}
 	leaf, err := ca.LeafFor(host)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	done := 0
 
 	deadline := time.Now().Add(mitmTimeout)
 	_ = client.SetDeadline(deadline)
@@ -174,7 +192,7 @@ func (s *Spoofer) Serve(client, upstream net.Conn, host string) error {
 		MinVersion:   tls.VersionTLS12,
 	})
 	if err := cs.Handshake(); err != nil {
-		return fmt.Errorf("与客户端 TLS 握手失败: %w", err)
+		return done, fmt.Errorf("与客户端 TLS 握手失败: %w", err)
 	}
 	defer cs.Close()
 
@@ -184,7 +202,7 @@ func (s *Spoofer) Serve(client, upstream net.Conn, host string) error {
 		MinVersion: tls.VersionTLS12,
 	})
 	if err := us.Handshake(); err != nil {
-		return fmt.Errorf("与上游 TLS 握手失败: %w", err)
+		return done, fmt.Errorf("与上游 TLS 握手失败: %w", err)
 	}
 	defer us.Close()
 
@@ -197,42 +215,51 @@ func (s *Spoofer) Serve(client, upstream net.Conn, host string) error {
 
 		req, err := http.ReadRequest(cr)
 		if err != nil {
-			return nil // 客户端结束会话属正常
+			return done, nil // 客户端结束会话属正常
 		}
 		// 原样转发请求（含 body）
 		req.URL.Scheme = "https"
 		req.URL.Host = host
 		if err := req.Write(us); err != nil {
-			return fmt.Errorf("转发请求失败: %w", err)
+			return done, fmt.Errorf("转发请求失败: %w", err)
 		}
 
 		resp, err := http.ReadResponse(ur, req)
 		if err != nil {
-			return fmt.Errorf("读取上游响应失败: %w", err)
+			return done, fmt.Errorf("读取上游响应失败: %w", err)
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxWlocBody))
 		resp.Body.Close()
 		if err != nil {
-			return fmt.Errorf("读取响应体失败: %w", err)
+			return done, fmt.Errorf("读取响应体失败: %w", err)
 		}
 
-		if newBody, rerr := RewriteResponse(body, lat, lon); rerr == nil {
+		newBody, rerr := RewriteResponse(body, lat, lon)
+		if rerr == nil {
 			body = newBody
+			done++
 			s.mu.Lock()
 			s.rewrites++
+			s.lastErr = ""
+			s.mu.Unlock()
+		} else {
+			// 改写失败时原样返回（功能降级而非损坏），
+			// 但必须记录真实原因，不能静默失败后还报“完成”。
+			s.mu.Lock()
+			s.failures++
+			s.lastErr = rerr.Error()
 			s.mu.Unlock()
 		}
-		// 改写失败时原样返回，保证定位功能降级而非损坏
 
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		resp.ContentLength = int64(len(body))
 		resp.TransferEncoding = nil
 		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		if err := resp.Write(cs); err != nil {
-			return fmt.Errorf("回写响应失败: %w", err)
+			return done, fmt.Errorf("回写响应失败: %w", err)
 		}
 		if req.Close || resp.Close {
-			return nil
+			return done, nil
 		}
 	}
 }

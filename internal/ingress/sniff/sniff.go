@@ -195,14 +195,22 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	// 绝不解密。预读的 ClientHello 字节需随 bufferedConn 交给 TLS 层。
 	if sp := s.LocationSpoof; sp != nil && isTLS && !hinted && sp.Active() && sp.Handles(host) {
 		tr.Step(trace.StageApp, trace.StatusOK, "定位改写：终止 TLS 并重写坐标")
-		if err := sp.Serve(newBufferedConn(cli, br), up, host); err != nil {
+		n, err := sp.Serve(newBufferedConn(cli, br), up, host)
+		if err != nil {
 			tr.Fail(trace.StageApp, err, "定位改写失败，连接已关闭（客户端将退回真实定位）")
 			if s.OnConn != nil {
 				s.OnConn(host, actionName, 0, 0, true)
 			}
 			return
 		}
-		tr.Step(trace.StageApp, trace.StatusOK, "定位改写完成")
+		// n == 0 意味着 TLS 终止成功但坐标未被改写（已原样透传）。
+		// 必须如实上报：之前统一报“改写完成”导致日志看着正常、
+		// 实际定位从未生效，排障时严重误导。
+		if n == 0 {
+			tr.Step(trace.StageApp, trace.StatusWarn, "定位未改写（解析失败，已原样透传）")
+		} else {
+			tr.Step(trace.StageApp, trace.StatusOK, "定位改写完成（%d 个响应）", n)
+		}
 		if s.OnConn != nil {
 			s.OnConn(host, actionName, 0, 0, false)
 		}
