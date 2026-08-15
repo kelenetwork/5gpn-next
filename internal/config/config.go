@@ -294,6 +294,27 @@ func BuiltinGoogleFix() []string {
 	}
 }
 
+// BuiltinDoHBlock 阻断绕过系统 DNS 的公共加密 DNS 端点。
+//
+// Google Play 服务/下载器会自行连接 dns.google（DoH）解析下载
+// 域名，拿到真实 Google IP 后直连——5GPN 内网卡到不了公网
+// Google，表现为 Play 能浏览、下载永远等待。阻断后 Play 服务
+// 自动回落系统 DNS（私人 DNS→网关），下载流量回到网关接管。
+func BuiltinDoHBlock() []string {
+	return []string{
+		"DOMAIN-SUFFIX,dns.google,block",
+		"DOMAIN,dns.google.com,block",
+	}
+}
+
+// IsBuiltinDoHBlocked 报告域名是否命中内置 DoH 阻断。
+// 这类阻断是链路修复，不计入广告拦截统计，避免 dns.google
+// 刷屏「最近命中/高频域名」。
+func IsBuiltinDoHBlocked(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return host == "dns.google" || strings.HasSuffix(host, ".dns.google") || host == "dns.google.com"
+}
+
 // stripBuiltin 从用户规则中剔除与内置规则重复的条目。
 // 兼容旧版本：以前这些规则写在配置文件里，升级后自动迁移。
 func stripBuiltin(rules []string) []string {
@@ -305,6 +326,9 @@ func stripBuiltin(rules []string) []string {
 		builtin[normalizeRule(r)] = true
 	}
 	for _, r := range BuiltinGoogleFix() {
+		builtin[normalizeRule(r)] = true
+	}
+	for _, r := range BuiltinDoHBlock() {
 		builtin[normalizeRule(r)] = true
 	}
 	var out []string

@@ -45,3 +45,30 @@ func TestStripBuiltinRemovesGoogleFix(t *testing.T) {
 		t.Fatalf("与内置 Google 修复重复的用户规则应被剔除，got %v", out)
 	}
 }
+
+func TestBuiltinDoHBlock(t *testing.T) {
+	for _, r := range BuiltinDoHBlock() {
+		parts := strings.Split(r, ",")
+		if len(parts) != 3 || parts[2] != "block" {
+			t.Fatalf("DoH 阻断规则格式应为 类型,值,block: %q", r)
+		}
+	}
+	cases := map[string]bool{
+		"dns.google":      true,
+		"dns.google.":     true,
+		"DNS.Google":      true,
+		"x.dns.google":    true,
+		"dns.google.com":  true,
+		"dl.google.com":   false,
+		"play.google.com": false,
+	}
+	for host, want := range cases {
+		if got := IsBuiltinDoHBlocked(host); got != want {
+			t.Fatalf("IsBuiltinDoHBlocked(%q) = %v, want %v", host, got, want)
+		}
+	}
+	out := stripBuiltin([]string{"DOMAIN-SUFFIX,dns.google,block", "DOMAIN-SUFFIX,openai.com,proxy:node"})
+	if len(out) != 1 {
+		t.Fatalf("与内置 DoH 阻断重复的用户规则应被剔除，got %v", out)
+	}
+}

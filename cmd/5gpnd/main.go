@@ -210,7 +210,11 @@ func applyRules(cfg *config.Config, eng *policy.Engine) error {
 			googleFix[i] += ":" + finalEg
 		}
 	}
+	// DoH 阻断紧随私网保护：Google Play 服务会用 dns.google 绕过
+	// 系统 DNS 拿真实 IP 直连（蜂窝上必然黑洞），必须优先于一切
+	// 用户规则，否则「Play 能浏览、下载等待中」会复发。
 	all := append([]string(nil), config.BuiltinPre()...)
+	all = append(all, config.BuiltinDoHBlock()...)
 	all = append(all, cfg.Rules...)
 	all = append(all, cfg.BuiltinAdBlock()...)
 	all = append(all, googleFix...)
@@ -498,7 +502,8 @@ func cmdRun(args []string) error {
 				dnsStats.record(action)
 			},
 			OnResponse: func(qname, action string) {
-				if action == "block" {
+				// 内置 DoH 阻断是链路修复，不计入广告拦截统计。
+				if action == "block" && !config.IsBuiltinDoHBlocked(qname) {
 					traffic.AdBlockSuccess(qname)
 				}
 			},

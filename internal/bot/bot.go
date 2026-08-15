@@ -841,8 +841,11 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 	}
 
 	sb.WriteString("\n🔒 <b>内置规则</b>　<i>不可修改</i>\n")
-	sb.WriteString("<blockquote expandable>优先于自定义（私网保护）：\n")
+	sb.WriteString("<blockquote expandable>优先于自定义（私网保护 + DoH 绕过阻断）：\n")
 	for _, r := range config.BuiltinPre() {
+		fmt.Fprintf(&sb, "<code>%s</code>\n", html.EscapeString(r))
+	}
+	for _, r := range config.BuiltinDoHBlock() {
 		fmt.Fprintf(&sb, "<code>%s</code>\n", html.EscapeString(r))
 	}
 	sb.WriteString("\n自定义之后（Google 下载修复，跟随默认国外出口）：\n")
