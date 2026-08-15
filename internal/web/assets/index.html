@@ -4,66 +4,161 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light">
-<title>5gpn-NEXT 管理面板</title>
+<meta name="theme-color" content="#ffffff">
+<title>5gpn-NEXT · 加密 DNS 网关</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <header class="topbar">
   <div class="wrap topbar-inner">
-    <span class="brand">5gpn<span class="brand-dim">-NEXT</span></span>
-    <span class="ver">{{.Version}}</span>
+    <a class="brand" href="/" aria-label="5gpn-NEXT 首页">
+      <span class="brand-mark">5G</span>
+      <span>5gpn<span class="brand-dim">-NEXT</span></span>
+    </a>
+    <div class="topbar-meta">
+      <span class="live"><i></i> 服务在线</span>
+      <span class="ver">{{.Version}}</span>
+    </div>
   </div>
 </header>
 
 <main class="wrap">
 
-  <section class="panel">
-    <h2>运行状态</h2>
-    <div class="stat-grid" id="stat-grid">
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <p class="eyebrow">ENCRYPTED DNS GATEWAY</p>
+      <h1 id="hero-title">分流、拦截与出口，<br><em>都留在服务端。</em></h1>
+      <p class="hero-lead">iPhone 使用蜂窝加密 DNS，Android 使用系统私人 DNS。手机无需安装代理 App，即可获得国内直连、国外分流与 DNS 广告拦截。</p>
+      <div class="hero-badges" aria-label="核心能力">
+        <span>免客户端</span>
+        <span>DNS 拦截</span>
+        <span>多出口</span>
+      </div>
+    </div>
+    <aside class="hero-console" aria-label="实时摘要">
+      <div class="console-head">
+        <span class="console-title"><i></i> 实时运行</span>
+        <span id="hero-uptime">加载中…</span>
+      </div>
+      <dl>
+        <div><dt>DNS 查询</dt><dd id="hero-dns">—</dd></div>
+        <div><dt>今日拦截</dt><dd id="hero-blocked">—</dd></div>
+        <div><dt>国外出口</dt><dd id="hero-egress">—</dd></div>
+      </dl>
+    </aside>
+  </section>
+
+  <section class="section" aria-labelledby="status-title">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">OVERVIEW</p>
+        <h2 id="status-title">运行概览</h2>
+      </div>
+      <p>关键状态每 15 秒自动刷新</p>
+    </div>
+    <div class="stat-grid" id="stat-grid" aria-live="polite">
       <div class="stat"><span class="stat-label">加载中</span><span class="stat-value">—</span></div>
     </div>
   </section>
 
-  <section class="panel">
-    <h2>国外默认出口</h2>
-    <p class="note">只决定国外未命中流量。KFC 本机出口表示使用服务器公网 IP；国内常用域名由描述文件在手机侧直连，其余域名解析 IP 后由 GEOIP 兜底；自定义规则始终优先。</p>
+  <section class="section adblock-section" aria-labelledby="adblock-title">
+    <div class="section-head action-head">
+      <div>
+        <p class="section-kicker">PROTECTION</p>
+        <h2 id="adblock-title">广告拦截</h2>
+      </div>
+      <button class="btn btn-state" id="adblock-toggle" type="button" disabled>加载中…</button>
+    </div>
+    <p class="section-intro">命中广告规则后直接返回 NXDOMAIN。这里统计的每一次，都是已经成功写回手机的拦截响应。</p>
+
+    <div class="ad-metrics">
+      <div><span>今日成功</span><strong id="ad-today">—</strong><small>次</small></div>
+      <div><span>累计成功</span><strong id="ad-total">—</strong><small>次</small></div>
+      <div><span>有效规则</span><strong id="ad-domains">—</strong><small>条</small></div>
+      <div><span>白名单</span><strong id="ad-allow-count">—</strong><small>条</small></div>
+    </div>
+
+    <div class="record-grid">
+      <div class="record-column">
+        <div class="subhead"><h3>最近命中</h3><span>最多保留 100 条</span></div>
+        <div id="ad-recent" class="hit-list"><p class="empty">暂无拦截记录</p></div>
+      </div>
+      <div class="record-column">
+        <div class="subhead"><h3>高频域名</h3><span>按成功次数排序</span></div>
+        <div id="ad-top" class="hit-list"><p class="empty">暂无统计</p></div>
+      </div>
+    </div>
+
+    <div class="allow-editor">
+      <div class="subhead"><h3>放行白名单</h3><span>误杀时放行域名及其子域</span></div>
+      <div id="ad-allow-list" class="allow-list"><span class="empty">暂无白名单</span></div>
+      <div class="form form-inline compact-form">
+        <input id="ad-allow-input" type="text" autocomplete="off" placeholder="example.com" aria-label="白名单域名">
+        <button class="btn" id="ad-allow-add" type="button">加入白名单</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="egress-title">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">ROUTING</p>
+        <h2 id="egress-title">国外默认出口</h2>
+      </div>
+    </div>
+    <p class="section-intro">只决定国外未命中流量。国内域名与 GEOIP 规则优先直连，自定义规则拥有最高优先级。</p>
     <div id="egress-list" class="rows"></div>
 
     <div class="form">
       <label for="egress-link">添加出口</label>
       <textarea id="egress-link" rows="2"
         placeholder="粘贴节点分享链接，支持 ss:// vless:// vmess:// trojan:// hysteria2:// tuic:// socks5://"></textarea>
-      <button class="btn" id="egress-add">添加</button>
+      <button class="btn" id="egress-add" type="button">添加出口</button>
     </div>
   </section>
 
-  <section class="panel">
-    <h2>分流规则</h2>
-    <p class="note">按顺序匹配，命中即停止。新增的规则会插入到最前面。</p>
+  <section class="section" aria-labelledby="rules-title">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">POLICY</p>
+        <h2 id="rules-title">分流规则</h2>
+      </div>
+      <p>有序匹配 · 命中即停</p>
+    </div>
     <div id="rules-list" class="rows"></div>
 
     <div class="form">
       <label for="rule-input">添加规则</label>
-      <input id="rule-input" type="text" placeholder="DOMAIN-SUFFIX,openai.com,proxy:node">
-      <button class="btn" id="rule-add">添加</button>
-      <p class="hint">类型可用：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、RULE-SET、GEOIP；动作可用：direct（KFC 本机公网）、block、proxy:出口名</p>
+      <input id="rule-input" type="text" autocomplete="off" placeholder="DOMAIN-SUFFIX,openai.com,proxy:node">
+      <button class="btn" id="rule-add" type="button">添加规则</button>
+      <p class="hint"><b>类型：</b>DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、IP-CIDR、RULE-SET、GEOIP　·　<b>动作：</b>direct、block、proxy:出口名</p>
     </div>
   </section>
 
-  <section class="panel">
-    <h2>诊断</h2>
-    <p class="note">逐层检查入口、策略、出口、连接与应用层，失败时会指出具体哪一层。</p>
+  <section class="section diagnosis" aria-labelledby="probe-title">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">DIAGNOSTICS</p>
+        <h2 id="probe-title">连通诊断</h2>
+      </div>
+    </div>
+    <p class="section-intro">依次检查策略、出口、连接与应用响应，失败时直接指出具体层级。</p>
     <div class="form form-inline">
-      <input id="probe-target" type="text" placeholder="youtube.com">
-      <button class="btn" id="probe-run">开始诊断</button>
+      <input id="probe-target" type="text" autocomplete="off" placeholder="youtube.com">
+      <button class="btn" id="probe-run" type="button">开始诊断</button>
     </div>
     <pre id="probe-out" class="probe-out" hidden></pre>
   </section>
 
+  <footer>
+    <span>5gpn-NEXT</span>
+    <span>只记录聚合流量与广告命中，不保存正常访问明细。</span>
+  </footer>
+
 </main>
 
-<div id="toast" class="toast" hidden></div>
+<div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
 
 <script src="/app.js"></script>
 </body>

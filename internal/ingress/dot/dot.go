@@ -42,8 +42,13 @@ type Server struct {
 	// Policy 用于判断域名该直连还是走代理
 	Policy func() *policy.Engine
 
-	// OnDecision 供统计与日志使用（可为空）
+	// OnDecision 记录策略判定分布（可为空）；为兼容既有统计，响应写入失败
+	// 或 direct 上游解析失败时仍会记录判定。
 	OnDecision func(qname, action string)
+
+	// OnResponse 仅在 DNS 响应成功写回客户端后调用（可为空）。
+	// 广告“成功拦截”必须使用这个回调，不能把规则命中误当成交付成功。
+	OnResponse func(qname, action string)
 
 	// OnRewrite 在 A 记录被改写到网关时回调（client 为客户端 IP）。
 	// 供 sniff 在无 SNI 协议上做“DNS 线索回退”还原目的地（可为空）。
@@ -171,7 +176,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 	if dec.Action == policy.ActionBlock {
 		m := new(dns.Msg)
 		m.SetRcode(req, dns.RcodeNameError)
-		_ = w.WriteMsg(m)
+		s.writeResponse(w, m, qname, "block")
 		s.report(qname, "block")
 		return
 	}
@@ -180,7 +185,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		if resolveErr != nil || resolved == nil {
 			dns.HandleFailed(w, req)
 		} else {
-			_ = w.WriteMsg(resolved)
+			s.writeResponse(w, resolved, qname, "direct")
 		}
 		s.report(qname, "direct")
 		return
@@ -203,8 +208,20 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		},
 		A: net.IP(s.GatewayIP.AsSlice()),
 	})
-	_ = w.WriteMsg(m)
+	s.writeResponse(w, m, qname, "proxy")
 	s.report(qname, "proxy")
+}
+
+// writeResponse 只在 DNS 响应已成功写回客户端后上报响应成功。
+// 广告“成功拦截次数”据此统计，避免把断开的 DoT 连接或写失败误报为成功。
+func (s *Server) writeResponse(w dns.ResponseWriter, m *dns.Msg, qname, action string) bool {
+	if err := w.WriteMsg(m); err != nil {
+		return false
+	}
+	if s.OnResponse != nil {
+		s.OnResponse(qname, action)
+	}
+	return true
 }
 
 // realIPForClient 报告是否应向客户端返回真实 IP（手机本地直连）。

@@ -77,6 +77,7 @@ func (p *Panel) Handler() http.Handler {
 
 	// API
 	mux.HandleFunc("/api/status", p.apiGuard(p.apiStatus))
+	mux.HandleFunc("/api/adblock", p.apiGuard(p.apiAdBlock))
 	mux.HandleFunc("/api/rules", p.apiGuard(p.apiRules))
 	mux.HandleFunc("/api/egress", p.apiGuard(p.apiEgress))
 	mux.HandleFunc("/api/probe", p.apiGuard(p.apiProbe))
@@ -170,6 +171,52 @@ func (p *Panel) serveAsset(name, ctype string) http.HandlerFunc {
 
 func (p *Panel) apiStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p.Manager.Status(p.Version))
+}
+
+func (p *Panel) apiAdBlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "方法不支持"})
+		return
+	}
+	var body struct {
+		Action  string `json:"action"` // toggle | allow | remove_allow
+		Enabled bool   `json:"enabled"`
+		Domain  string `json:"domain"`
+		Index   int    `json:"index"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+
+	var msg string
+	var err error
+	switch body.Action {
+	case "toggle":
+		ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+		msg, err = p.Manager.SetAdBlock(ctx, body.Enabled)
+		cancel()
+	case "allow":
+		err = p.Manager.AllowAd(body.Domain)
+		if err == nil {
+			msg = "已加入广告白名单：" + strings.TrimSpace(body.Domain)
+		}
+	case "remove_allow":
+		err = p.Manager.RemoveAdAllow(body.Index)
+		if err == nil {
+			msg = "白名单已更新"
+		}
+	default:
+		err = fmt.Errorf("未知操作")
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": msg,
+		"status":  p.Manager.Status(p.Version),
+	})
 }
 
 func (p *Panel) apiRules(w http.ResponseWriter, r *http.Request) {

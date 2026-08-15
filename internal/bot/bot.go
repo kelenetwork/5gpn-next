@@ -715,10 +715,38 @@ func (b *Bot) showAdBlock(ctx context.Context, v view) {
 	} else {
 		sb.WriteString("状态　<b>已关闭</b>\n")
 	}
-	fmt.Fprintf(&sb, "白名单　<b>%d</b> 条\n\n", ad.Allowlist)
+	fmt.Fprintf(&sb, "白名单　<b>%d</b> 条\n", ad.Allowlist)
+	fmt.Fprintf(&sb, "今日成功　<b>%d</b> 次\n累计成功　<b>%d</b> 次\n\n", ad.Hits.Today, ad.Hits.Total)
+
+	if len(ad.Hits.Recent) > 0 {
+		sb.WriteString("🕘 <b>最近成功命中</b>\n<blockquote>")
+		for i, ev := range ad.Hits.Recent {
+			if i >= 5 {
+				break
+			}
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "<code>%s</code> · %s", html.EscapeString(ev.Host), time.Unix(ev.At, 0).Format("01-02 15:04"))
+		}
+		sb.WriteString("</blockquote>\n\n")
+	}
+	if len(ad.Hits.Top) > 0 {
+		sb.WriteString("🔥 <b>高频拦截</b>\n<blockquote>")
+		for i, item := range ad.Hits.Top {
+			if i >= 5 {
+				break
+			}
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "%d. <code>%s</code> · %d 次", i+1, html.EscapeString(item.Host), item.Count)
+		}
+		sb.WriteString("</blockquote>\n\n")
+	}
 
 	sb.WriteString("<blockquote>在加密 DNS 入口返回 NXDOMAIN，全设备生效、无需安装 App。\n")
-	sb.WriteString("自定义分流规则优先级高于拦截，可随时覆盖。</blockquote>\n\n")
+	sb.WriteString("“成功”仅在响应已经写回手机后计数；不记录客户端 IP 或正常访问明细。</blockquote>\n\n")
 	sb.WriteString("<i>若某 App 白屏/加载不出，把其域名加入白名单即可救急。</i>")
 
 	rows := [][]btn{}

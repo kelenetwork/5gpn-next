@@ -115,8 +115,11 @@ type AdBlockStatus struct {
 	Enabled bool `json:"enabled"`
 	// Domains 是已载入的拦截域名条数；0 表示规则集尚未就绪
 	Domains int `json:"domains"`
-	// Allowlist 是白名单条数
-	Allowlist int `json:"allowlist"`
+	// Allowlist 是白名单条数；AllowDomains 供内网面板管理具体条目。
+	Allowlist    int      `json:"allowlist"`
+	AllowDomains []string `json:"allow_domains,omitempty"`
+	// Hits 只统计已成功写回客户端的 NXDOMAIN，并保留最近命中记录。
+	Hits stats.AdBlockSummary `json:"hits"`
 }
 
 // EgressStatus 描述一个出口。
@@ -137,7 +140,9 @@ type EgressStatus struct {
 // Status 返回当前状态。
 func (m *Manager) Status(version string) Status {
 	m.mu.RLock()
-	cfg := m.Cfg
+	cfg := *m.Cfg
+	cfg.Egress = append([]config.EgressConfig(nil), m.Cfg.Egress...)
+	cfg.AdBlock.Allowlist = append([]string(nil), m.Cfg.AdBlock.Allowlist...)
 	eng := m.Policy
 	m.mu.RUnlock()
 
@@ -177,10 +182,14 @@ func (m *Manager) Status(version string) Status {
 		MemoryMB:      memoryMB(),
 		DomesticReady: eng.DomesticRulesReady(),
 		AdBlock: AdBlockStatus{
-			Enabled:   cfg.AdBlock.Enabled,
-			Domains:   eng.DomainSetLen(config.AdBlockRuleSetName),
-			Allowlist: len(cfg.AdBlock.Allowlist),
+			Enabled:      cfg.AdBlock.Enabled,
+			Domains:      eng.DomainSetLen(config.AdBlockRuleSetName),
+			Allowlist:    len(cfg.AdBlock.Allowlist),
+			AllowDomains: append([]string(nil), cfg.AdBlock.Allowlist...),
 		},
+	}
+	if m.Traffic != nil {
+		st.AdBlock.Hits = m.Traffic.AdBlockSummary(12, 8)
 	}
 	if m.Stats != nil {
 		st.Counters = m.Stats.Snapshot()
@@ -611,39 +620,68 @@ func (m *Manager) ensureDomesticRules(ctx context.Context) error {
 // SetAdBlock 开关广告拦截。
 //
 // 开启时先确保规则集已下载（首次约 2MB / 10 万条），
-// 避免“显示已开启但实际一条没拦”的假成功。
+// 避免“显示已开启但实际一条没拦”的假成功。若配置已经是 enabled
+// 但运行态 0 条规则，也会重新下载并热重载，而不是错误地返回“已开启”。
 func (m *Manager) SetAdBlock(ctx context.Context, on bool) (string, error) {
 	m.mu.Lock()
-	if m.Cfg.AdBlock.Enabled == on {
-		m.mu.Unlock()
-		if on {
-			return "广告拦截已是开启状态", nil
+	changed := m.Cfg.AdBlock.Enabled != on
+	if changed {
+		m.Cfg.AdBlock.Enabled = on
+		if err := m.saveAndReloadLocked(); err != nil {
+			m.mu.Unlock()
+			return "", err
+		}
+	}
+	m.mu.Unlock()
+
+	if !on {
+		if changed {
+			return "广告拦截已关闭", nil
 		}
 		return "广告拦截已是关闭状态", nil
 	}
-	url := m.Cfg.AdBlockURLOrDefault()
-	m.Cfg.AdBlock.Enabled = on
-	err := m.saveAndReloadLocked()
-	m.mu.Unlock()
-	if err != nil {
-		return "", err
-	}
-	if !on {
-		return "广告拦截已关闭", nil
+	if m.adBlockReady() {
+		prefix := "广告拦截已开启"
+		if !changed {
+			prefix = "广告拦截已是开启状态"
+		}
+		return fmt.Sprintf("%s，已载入 %d 条拦截域名", prefix, m.adBlockDomains()), nil
 	}
 
-	// 规则集可能尚未缓存：现场下载后再热重载一次
-	if m.adBlockReady() {
-		return fmt.Sprintf("广告拦截已开启，已载入 %d 条拦截域名", m.adBlockDomains()), nil
+	// 首次下载失败或缓存损坏时，重复点击“开启”必须能在这里真正重试。
+	rs, ok := m.adBlockRuleSet()
+	if !ok {
+		return "", fmt.Errorf("广告规则集配置缺失（已开启，但暂未生效）")
 	}
-	f := ruleset.NewFetcher("/var/lib/5gpn-next/rulesets")
-	if _, ferr := f.Fetch(ctx, config.AdBlockRuleSetName, url); ferr != nil {
-		return "", fmt.Errorf("规则集下载失败（已开启，但暂未生效）: %w", ferr)
+	if rs.Path != "" {
+		if st, err := os.Stat(rs.Path); err != nil || st.Size() == 0 {
+			return "", fmt.Errorf("本地广告规则集 %s 不可用（已开启，但暂未生效）", rs.Path)
+		}
+	} else {
+		f := ruleset.NewFetcher("/var/lib/5gpn-next/rulesets")
+		if _, err := f.Fetch(ctx, rs.Name, rs.URL); err != nil {
+			return "", fmt.Errorf("规则集下载失败（已开启，但暂未生效）: %w", err)
+		}
 	}
-	if rerr := m.ReloadRuntime(); rerr != nil {
-		return "", fmt.Errorf("规则集已下载，重载失败: %w", rerr)
+	if err := m.ReloadRuntime(); err != nil {
+		return "", fmt.Errorf("规则集已就绪，重载失败: %w", err)
 	}
-	return fmt.Sprintf("广告拦截已开启，已载入 %d 条拦截域名", m.adBlockDomains()), nil
+	if n := m.adBlockDomains(); n > 0 {
+		return fmt.Sprintf("广告拦截已开启，已载入 %d 条拦截域名", n), nil
+	}
+	return "", fmt.Errorf("广告规则集重载后仍为 0 条（已开启，但暂未生效）")
+}
+
+func (m *Manager) adBlockRuleSet() (config.RuleSetConfig, bool) {
+	m.mu.RLock()
+	sets := m.Cfg.EffectiveRuleSets()
+	m.mu.RUnlock()
+	for _, rs := range sets {
+		if rs.Name == config.AdBlockRuleSetName {
+			return rs, true
+		}
+	}
+	return config.RuleSetConfig{}, false
 }
 
 func (m *Manager) adBlockDomains() int {
@@ -656,6 +694,15 @@ func (m *Manager) adBlockDomains() int {
 }
 
 func (m *Manager) adBlockReady() bool { return m.adBlockDomains() > 0 }
+
+// EffectiveRuleSets 返回当前运行配置需要刷新的规则集副本。
+// 默认广告规则只存在于 Config.EffectiveRuleSets()，后台刷新不能只看
+// 磁盘里的 rulesets 数组。
+func (m *Manager) EffectiveRuleSets() []config.RuleSetConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.Cfg.EffectiveRuleSets()
+}
 
 // AllowAd 把域名加入广告白名单（误杀时救急）。
 func (m *Manager) AllowAd(domain string) error {

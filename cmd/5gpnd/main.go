@@ -392,7 +392,9 @@ func cmdRun(args []string) error {
 		// 启动后先刷一轮（缓存可能已陈旧或不存在）
 		for {
 			changed := false
-			for _, rs := range a.cfg.RuleSets {
+			// 必须使用 EffectiveRuleSets：默认广告规则由 ad_block 动态注入，
+			// 不在磁盘 rulesets 数组里。只遍历 cfg.RuleSets 会让广告库永不更新。
+			for _, rs := range mgr.EffectiveRuleSets() {
 				if rs.Path != "" || rs.URL == "" {
 					continue
 				}
@@ -480,7 +482,14 @@ func cmdRun(args []string) error {
 			CertFile:   a.cfg.Gateway.CertFile,
 			KeyFile:    a.cfg.Gateway.KeyFile,
 			Policy:     rt.Policy,
-			OnDecision: func(_ string, action string) { dnsStats.record(action) },
+			OnDecision: func(_ string, action string) {
+				dnsStats.record(action)
+			},
+			OnResponse: func(qname, action string) {
+				if action == "block" {
+					traffic.AdBlockSuccess(qname)
+				}
+			},
 		}
 		go func() {
 			if e := ds.ListenAndServe(ingressCtx); e != nil {
