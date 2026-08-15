@@ -7,6 +7,7 @@ package egress
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -222,10 +223,14 @@ func socks5Handshake(c net.Conn, target string) error {
 	return nil
 }
 
-// ProbeSocks5IPv6 探测 SOCKS5 上游（mihomo 节点）能否代拨 IPv6 目标。
+// ProbeSocks5IPv6 探测 SOCKS5 上游（mihomo 节点）能否真正代拨 IPv6 目标。
 //
-// KFC 本机无 IPv6，但落地节点自身往往有 v6 能力；经 ATYP=4 CONNECT
-// 实测一次即可确认。探测目标选 Cloudflare anycast，全球可达且稳定。
+// ⚠️ 只看 SOCKS 应答会得到假阳性：mihomo 收到 CONNECT 后会**先乐观回复
+// 成功**，再去连上游；上游不可达时不回错误，连接静默挂死。生产实测中
+// hinet 因此被误判为有 IPv6，导致 Relay 把手机流量灌进一条从未建立的
+// 连接（表现为 up=517B down=0B 挂 30 秒）。
+//
+// 因此必须做端到端验证：完成一次真实 TLS 握手，证明**双向**有数据流动。
 func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {
 	d := net.Dialer{Timeout: timeout}
 	c, err := d.Dial("tcp", addr)
@@ -242,18 +247,52 @@ func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {
 	if _, err := readFull(c, rep); err != nil || rep[0] != 0x05 || rep[1] != 0x00 {
 		return false
 	}
-	ip := netip.MustParseAddr("2606:4700:4700::1111").As16()
+	ip := netip.MustParseAddr(probeV6Addr).As16()
 	req := append([]byte{0x05, 0x01, 0x00, 0x04}, ip[:]...)
 	req = append(req, 0x01, 0xbb) // 443
 	if _, err := c.Write(req); err != nil {
 		return false
 	}
 	head := make([]byte, 4)
-	if _, err := readFull(c, head); err != nil {
+	if _, err := readFull(c, head); err != nil || head[1] != 0x00 {
 		return false
 	}
-	return head[1] == 0x00
+	// 读掉 BND.ADDR/BND.PORT，之后字节流才属于目标
+	var skip int
+	switch head[3] {
+	case 0x01:
+		skip = 4 + 2
+	case 0x04:
+		skip = 16 + 2
+	case 0x03:
+		l := make([]byte, 1)
+		if _, err := readFull(c, l); err != nil {
+			return false
+		}
+		skip = int(l[0]) + 2
+	default:
+		return false
+	}
+	if _, err := readFull(c, make([]byte, skip)); err != nil {
+		return false
+	}
+
+	// 关键一步：真实 TLS 握手。握手成功 = 上游确实连通且双向可传数据。
+	// 只验证「通」，不验证证书链（探测目标固定且不传输任何敏感数据）。
+	tc := tls.Client(c, &tls.Config{
+		ServerName:         probeV6SNI,
+		InsecureSkipVerify: true, //nolint:gosec // 连通性探测，非信任判定
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return tc.HandshakeContext(ctx) == nil
 }
+
+const (
+	// probeV6Addr 是 IPv6 连通性探测目标（Cloudflare anycast，全球可达）
+	probeV6Addr = "2606:4700:4700::1111"
+	probeV6SNI  = "one.one.one.one"
+)
 
 func readFull(c net.Conn, b []byte) (int, error) {
 	total := 0
