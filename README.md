@@ -6,7 +6,7 @@
 
 **一张描述文件，一个域名，手机上什么 App 都不用装。**
 
-基于 Apple Network Relay 与 Android 私人 DNS 的服务端分流网关<br>
+基于 Apple Network Relay / 蜂窝加密 DNS 与 Android 私人 DNS 的服务端分流网关<br>
 没有 Clash，没有 Surge，没有 VPN 图标，没有 tun
 
 [![Release](https://img.shields.io/github/v/release/kelenetwork/5gpn-next?style=flat-square&color=2563eb&label=Release)](https://github.com/kelenetwork/5gpn-next/releases)
@@ -24,14 +24,16 @@
 一台境外 VPS + 一张运营商定向内网卡，手机在**不安装任何代理客户端**的前提下完成智能分流：
 
 ```
-                       ┌────────────────────┐
-  iPhone  ──Relay──►   │                    │  ──►  国内站点 · 直连
-                       │   5gpn-NEXT 网关    │
-  Android ──DNS────►   │                    │  ──►  国外站点 · 落地节点
-                       └────────────────────┘
+                        ┌────────────────────┐
+  iPhone ──Relay────►   │                    │  ──►  国内站点 · 直连
+  iPhone ──蜂窝DNS──►   │   5gpn-NEXT 网关    │
+  Android ──DNS─────►   │                    │  ──►  国外站点 · 落地节点
+                        └────────────────────┘
 ```
 
-- 🍎 **iPhone / iPad** — 安装一个系统描述文件即可，走 iOS 原生 Network Relay
+- 🍎 **iPhone / iPad** — 安装一个系统描述文件即可，两种模式二选一：
+  - **蜂窝 DNS 模式**（推荐）：仅蜂窝数据生效，Wi-Fi 完全不受影响
+  - **Relay 模式**：iOS 原生 Network Relay，协议覆盖最完整，蜂窝与 Wi-Fi 同时生效
 - 🤖 **Android** — 系统设置里填一个「私人 DNS」域名即可
 - 🧠 **分流全在服务端** — 国内直连、国外走节点，手机端零配置零维护
 
@@ -102,17 +104,34 @@ curl -fsSL https://raw.githubusercontent.com/kelenetwork/5gpn-next/main/uninstal
 <tr>
 <td width="50%" valign="top">
 
-### 🍎 iPhone / iPad
+### 🍎 iPhone / iPad（两种模式二选一）
 
-1. 内网卡蜂窝数据下用 Safari 打开安装链接
+**📡 蜂窝 DNS 模式（推荐）**
+
+仅蜂窝数据下启用加密 DNS（DoT 指向网关）；Wi-Fi 下自动停用、完全不经过网关。国内域名/IP 返回真实地址，手机本地直连。
+
+**🔗 Relay 模式**
+
+iOS 原生 Network Relay，协议覆盖最完整（含 WhatsApp 等无 SNI 私有协议），但会同时作用于蜂窝和 Wi-Fi，无法按接口设置“仅蜂窝启用”（iOS 26+ 可在系统设置手动关闭）。
+
+安装步骤相同：
+
+1. 在 Telegram Bot「客户端接入」中选择模式获取文件（或内网卡蜂窝数据下打开安装链接）
 2. **设置 → 通用 → VPN 与设备管理**
-3. 安装「5gpn-NEXT」描述文件
+3. 安装描述文件
 
-也可以直接在 Telegram Bot 里点「客户端接入」获取文件。
-
-> ⚠️ Apple Managed Network Relay 是系统级网络配置，会同时作用于蜂窝和 Wi-Fi；它不是传统 VPN，但不能按网络接口设置“仅蜂窝启用”。iOS 26+ 可在系统设置中手动关闭 Relay，旧版系统只能停用/移除描述文件。
+> ⚠️ 两种模式**不可同时安装**；切换前先删除旧的 5gpn 描述文件。
 >
-> iOS 的手机侧直连名单写在描述文件中，不会随服务器二进制自动改写。升级日志若注明直连名单更新，请在 Bot 中重新获取，并先删除同名旧描述文件后安装；Relay Token、下载路径和稳定 UUID 均沿用，不会改变网关身份。
+> 蜂窝 DNS 模式依赖网关的 DoT 入口（`android.enabled`）。少数无 SNI 私有协议（如 WhatsApp 聊天）在该模式下可能不兼容，遇到请改用 Relay 模式。
+>
+> iOS 的手机侧直连名单写在 Relay 描述文件中，不会随服务器二进制自动改写。升级日志若注明直连名单更新，请在 Bot 中重新获取，并先删除同名旧描述文件后安装；Relay Token、下载路径和稳定 UUID 均沿用，不会改变网关身份。
+
+| | 📡 蜂窝 DNS | 🔗 Relay |
+| :-- | :-- | :-- |
+| Wi-Fi 影响 | 无 | 蜂窝/Wi-Fi 同时生效 |
+| 国内流量 | GEOIP 手机本地直连 | 名单内本地直连，其余绕网关 |
+| 协议覆盖 | HTTPS/SNI 为主 | 完整（含无 SNI 协议） |
+| WhatsApp 聊天 | 可能不兼容 | 支持 |
 
 </td>
 <td width="50%" valign="top">
@@ -156,7 +175,8 @@ https://<你的域名>:<端口>/
 ```bash
 5gpnd probe youtube.com    # 端到端逐层诊断
 5gpnd status               # 运行状态
-5gpnd profile -o x.mobileconfig   # 重新生成描述文件
+5gpnd profile -o x.mobileconfig            # 生成 Relay 描述文件
+5gpnd profile -mode dns -o dns.mobileconfig # 生成蜂窝 DNS 描述文件
 ```
 
 `probe` 输出长这样：
@@ -228,10 +248,17 @@ https://<你的域名>:<端口>/
 </details>
 
 <details>
+<summary><b>📶 装了描述文件后 Wi-Fi 也受影响</b></summary>
+<br>
+
+这是 Relay 模式的固有行为：Apple Managed Network Relay 是系统级配置，同时作用于蜂窝和 Wi-Fi。若希望 Wi-Fi 完全不受影响，请删除 Relay 描述文件，改装「蜂窝 DNS 模式」描述文件（Bot → 客户端接入）。
+</details>
+
+<details>
 <summary><b>📍 iOS 26 定位/网络行为异常</b></summary>
 <br>
 
-描述文件已启用 <code>AllowDNSFailover</code>，网关故障时自动回退系统 DNS，不会整机断网。也可在 设置 → 通用 → VPN 与设备管理 中直接关闭该 Relay。
+Relay 描述文件已启用 <code>AllowDNSFailover</code>，网关故障时自动回退系统 DNS，不会整机断网。也可在 设置 → 通用 → VPN 与设备管理 中直接关闭该 Relay。
 </details>
 
 ---
