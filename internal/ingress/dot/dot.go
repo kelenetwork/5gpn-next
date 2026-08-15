@@ -173,7 +173,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	if dec.Action == policy.ActionDirect {
+	if realIPForClient(dec) {
 		if resolveErr != nil || resolved == nil {
 			dns.HandleFailed(w, req)
 		} else {
@@ -183,7 +183,8 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	// 代理域名：A 记录改写为网关 IP
+	// 其余（proxy 或 FINAL 兜底）：A 记录改写为网关 IP，
+	// 由网关嗅探 SNI 后按当前国外出口（含 KFC 本机出口）转发
 	m := new(dns.Msg)
 	m.SetReply(req)
 	m.Authoritative = true
@@ -196,6 +197,17 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 	})
 	_ = w.WriteMsg(m)
 	s.report(qname, "proxy")
+}
+
+// realIPForClient 报告是否应向客户端返回真实 IP（手机本地直连）。
+//
+// 只有命中明确的直连规则（国内域名/GEOIP、私网、自定义 direct，
+// 即 Index >= 0）才返回真实 IP。FINAL 兜底的 direct 语义是
+// “国外未命中流量从网关本机公网 IP 出去”，必须改写到网关；
+// 否则国外域名会被手机在国内蜂窝上直连而全部失败
+// （YouTube/TikTok 全挂就是这个原因）。
+func realIPForClient(dec policy.Decision) bool {
+	return dec.Action == policy.ActionDirect && dec.Index >= 0
 }
 
 func (s *Server) report(qname, action string) {
