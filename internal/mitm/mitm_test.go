@@ -16,10 +16,6 @@ func TestAllowedHostsIsStrict(t *testing.T) {
 	allowed := []string{
 		"gs-loc.apple.com",
 		"gs-loc-cn.apple.com",
-		// 定位边缘节点（实测流量特征：上传 WiFi 列表、下载坐标）
-		"gspe1-ssl.ls.apple.com",
-		"gsp10-ssl.ls.apple.com",
-		"gspe19-cn-ssl.ls.apple.com",
 	}
 	for _, h := range allowed {
 		if !Allowed(h) {
@@ -31,15 +27,20 @@ func TestAllowedHostsIsStrict(t *testing.T) {
 		"apple.com", "www.apple.com", "evil.com", "", "google.com",
 		// 后缀伪装：绝不能因为结尾像白名单就放行
 		"gs-loc.apple.com.evil.com",
-		"gspe1-ssl.ls.apple.com.evil.com",
 		"gs-loc.apple.co",
-		// ls.apple.com 下的非定位服务不得解密
+		// ls.apple.com 下的服务一律拒绝。
+		//
+		// gsp* 是 Apple **地图服务**（Geo Services Provider），不是 WLOC。
+		// v0.12.3 曾因其流量特征（上传 ~1.9KB / 下载 ~4.3KB）相似而误放行，
+		// 导致启发式坐标改写在地图响应里也“匹配成功”并写入垃圾数据。
 		"ls.apple.com",
+		"gspe1-ssl.ls.apple.com",
+		"gsp64-ssl.ls.apple.com",
+		"gspe79-ssl.ls.apple.com",
+		"gspe19-cn-ssl.ls.apple.com",
 		"init.ls.apple.com",
 		"configuration.ls.apple.com",
-		// 多级子域绕过尝试
 		"evil.gspe1-ssl.ls.apple.com",
-		"gsp.evil.ls.apple.com",
 	}
 	for _, h := range denied {
 		if Allowed(h) {
@@ -53,12 +54,12 @@ func TestCALeafOnlyForAllowedHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []string{"gs-loc.apple.com", "gspe1-ssl.ls.apple.com"} {
+	for _, h := range []string{"gs-loc.apple.com", "gs-loc-cn.apple.com"} {
 		if _, err := ca.LeafFor(h); err != nil {
 			t.Fatalf("allowed host %s must get a leaf: %v", h, err)
 		}
 	}
-	for _, h := range []string{"evil.com", "init.ls.apple.com", "gspe1-ssl.ls.apple.com.evil.com"} {
+	for _, h := range []string{"evil.com", "init.ls.apple.com", "gspe1-ssl.ls.apple.com"} {
 		if _, err := ca.LeafFor(h); err == nil {
 			t.Fatalf("must refuse to sign for %s", h)
 		}
