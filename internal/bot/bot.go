@@ -845,7 +845,11 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 	for _, r := range config.BuiltinPre() {
 		fmt.Fprintf(&sb, "<code>%s</code>\n", html.EscapeString(r))
 	}
-	sb.WriteString("\n自定义之后兜底（国内直连）：\n")
+	sb.WriteString("\n自定义之后（Google 下载修复，跟随默认国外出口）：\n")
+	for _, r := range config.BuiltinGoogleFix() {
+		fmt.Fprintf(&sb, "<code>%s</code>\n", html.EscapeString(r))
+	}
+	sb.WriteString("\n最后兜底（国内直连）：\n")
 	for i, r := range config.BuiltinPost() {
 		if i > 0 {
 			sb.WriteString("\n")

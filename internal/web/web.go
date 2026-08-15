@@ -223,9 +223,10 @@ func (p *Panel) apiRules(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{
-			"rules":        p.Manager.Rules(),
-			"builtin_pre":  config.BuiltinPre(),
-			"builtin_post": config.BuiltinPost(),
+			"rules":       p.Manager.Rules(),
+			"builtin_pre": config.BuiltinPre(),
+			// Google 下载修复排在国内直连兜底之前，展示顺序与实际编译顺序一致。
+			"builtin_post": append(config.BuiltinGoogleFix(), config.BuiltinPost()...),
 		})
 
 	case http.MethodPost:

@@ -193,14 +193,27 @@ func applyRules(cfg *config.Config, eng *policy.Engine) error {
 	//   内置前置（私网保护）
 	//   → 用户规则（最高优先，可覆盖广告拦截）
 	//   → 广告拦截（白名单 direct 在前、RULE-SET block 在后）
+	//   → Google 下载链路修复（必须在国内直连之前）
 	//   → 内置兜底（国内直连）
 	//
 	// 广告规则必须排在国内直连之前：国内 App 的广告域名大多也在
 	// cn-domain 名单里，若放到后面会先命中 direct 而完全拦不到。
+	// Google 修复同理：dl.google.com / gvt1.com 等下载域名经国内 DNS
+	// 可能解析到 Google 中国节点 IP（GEOIP=CN），若落到 GEOIP 兜底
+	// 会让手机直连被墙节点，表现为 Play 能浏览、下载永远转圈。
 	// 内置规则不在配置文件里，Bot/面板改不到也删不掉。
+	finalAct, finalEg := parseAction(cfg.Final)
+	googleFix := config.BuiltinGoogleFix()
+	if finalAct == policy.ActionProxy && finalEg != "" {
+		// 跟随当前默认国外出口；切换出口会触发热重载，这里随之更新。
+		for i := range googleFix {
+			googleFix[i] += ":" + finalEg
+		}
+	}
 	all := append([]string(nil), config.BuiltinPre()...)
 	all = append(all, cfg.Rules...)
 	all = append(all, cfg.BuiltinAdBlock()...)
+	all = append(all, googleFix...)
 	all = append(all, config.BuiltinPost()...)
 	for i, line := range all {
 		parts := strings.Split(strings.TrimSpace(line), ",")
@@ -218,16 +231,15 @@ func applyRules(cfg *config.Config, eng *policy.Engine) error {
 			log.Printf("警告: 跳过第 %d 条规则 %q: %v", i+1, line, err)
 		}
 	}
-	act, eg := parseAction(cfg.Final)
 	// 安全边界：选了代理出口但国内直连规则尚未就绪时，绝不能把
 	// FINAL 直接放行到代理，否则会退化成“国内外全局代理”。
 	// 启动期先在运行态回落 DIRECT；后台规则刷新成功后会热重载，
 	// 恢复磁盘里原本选择的国外出口。
-	if act == policy.ActionProxy && !eng.DomesticRulesReady() {
+	if finalAct == policy.ActionProxy && !eng.DomesticRulesReady() {
 		log.Printf("严重警告: 国内直连规则未完整载入，FINAL 运行态暂时回落 DIRECT，防止国内流量误走代理")
-		act, eg = policy.ActionDirect, ""
+		finalAct, finalEg = policy.ActionDirect, ""
 	}
-	eng.SetFinal(act, eg)
+	eng.SetFinal(finalAct, finalEg)
 	return nil
 }
 

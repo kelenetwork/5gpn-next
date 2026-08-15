@@ -273,6 +273,27 @@ func BuiltinPost() []string {
 	}
 }
 
+// BuiltinGoogleFix 是 Google 下载链路修复：这批下载/CDN 域名在国内
+// DNS 视角可能解析到 Google 中国节点 IP（GEOIP=CN）。若因此走国内
+// 直连，手机会直连被墙的 Google 节点，表现为 Play 商店能浏览、
+// 下载永远转圈。固定按“国外流量”处理（proxy 不带出口名时由
+// applyRules 填充为当前默认国外出口），用户自定义规则仍然优先。
+func BuiltinGoogleFix() []string {
+	return []string{
+		"DOMAIN-SUFFIX,dl.google.com,proxy",
+		"DOMAIN-SUFFIX,dl.l.google.com,proxy",
+		"DOMAIN-SUFFIX,android.clients.google.com,proxy",
+		"DOMAIN-SUFFIX,android.l.google.com,proxy",
+		"DOMAIN-SUFFIX,gvt1.com,proxy",
+		"DOMAIN-SUFFIX,gvt2.com,proxy",
+		"DOMAIN-SUFFIX,gvt3.com,proxy",
+		"DOMAIN-SUFFIX,ggpht.com,proxy",
+		"DOMAIN-SUFFIX,googleapis.com,proxy",
+		"DOMAIN-SUFFIX,gstatic.com,proxy",
+		"DOMAIN-SUFFIX,googleusercontent.com,proxy",
+	}
+}
+
 // stripBuiltin 从用户规则中剔除与内置规则重复的条目。
 // 兼容旧版本：以前这些规则写在配置文件里，升级后自动迁移。
 func stripBuiltin(rules []string) []string {
@@ -281,6 +302,9 @@ func stripBuiltin(rules []string) []string {
 		builtin[normalizeRule(r)] = true
 	}
 	for _, r := range BuiltinPost() {
+		builtin[normalizeRule(r)] = true
+	}
+	for _, r := range BuiltinGoogleFix() {
 		builtin[normalizeRule(r)] = true
 	}
 	var out []string
