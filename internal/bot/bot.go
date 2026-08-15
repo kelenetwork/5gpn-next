@@ -430,8 +430,6 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 				"请输入要检测的域名，例如 <code>youtube.com</code>\n\n"+
 				"将逐层检查入口、策略、出口、连接与应用层。")
 
-	case cmd == "ios_profile":
-		b.sendProfile(ctx, v)
 	case cmd == "ios_dns_profile":
 		b.sendDNSProfile(ctx, v)
 	case cmd == "android_guide":
@@ -762,7 +760,7 @@ func (b *Bot) showLocation(ctx context.Context, v view) {
 		sb.WriteString("开启方法：编辑 <code>/etc/5gpn-next/config.json</code>，\n")
 		sb.WriteString("把 <code>location.enabled</code> 设为 <code>true</code>，\n")
 		sb.WriteString("然后 <code>systemctl restart 5gpn-next</code>。\n\n")
-		sb.WriteString("启用后需重新安装 Relay 描述文件（含根证书）。</blockquote>")
+		sb.WriteString("启用后需重新安装 iOS 描述文件（含根证书）。</blockquote>")
 		b.render(ctx, v, sb.String(), backTo("menu"))
 		return
 	}
@@ -1060,17 +1058,16 @@ func (b *Bot) showClient(ctx context.Context, v view) {
 	var sb strings.Builder
 	sb.WriteString("📱 <b>客户端接入</b>\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString("🍎 <b>iPhone / iPad</b>　<i>iOS 17 及以上，两种模式二选一</i>\n")
-	sb.WriteString("<blockquote>📡 <b>蜂窝 DNS 模式</b>（推荐）：仅蜂窝数据下生效，Wi-Fi 完全不受影响；国内 IP 手机本地直连。少数无 SNI 私有协议（如 WhatsApp 聊天）可能不兼容。\n\n🔗 <b>Relay 模式</b>：协议覆盖最完整，但同时作用于蜂窝和 Wi-Fi。\n\n两种模式不可同时安装，切换前先删除旧描述文件。</blockquote>\n")
+	sb.WriteString("🍎 <b>iPhone / iPad</b>　<i>iOS 17 及以上</i>\n")
+	sb.WriteString("<blockquote>安装一张描述文件，仅<b>蜂窝数据</b>下生效；连 Wi-Fi 自动停用，家里网络完全不受影响。\n\n国内域名/IP 由 GEOIP 判定后<b>手机本地直连</b>，不经网关；只有国外流量才走出口。</blockquote>\n")
 	sb.WriteString("🤖 <b>Android</b>\n")
 	sb.WriteString("<blockquote>在系统「私人 DNS」中填一个域名即可，同样无需安装应用。</blockquote>")
 
 	rows := [][]btn{}
 	if b.Manager.DNSProfileBytes != nil {
-		rows = append(rows, []btn{{"📡 获取蜂窝 DNS 描述文件（推荐）", "ios_dns_profile"}})
+		rows = append(rows, []btn{{"📱 获取 iOS 描述文件", "ios_dns_profile"}})
 	}
 	rows = append(rows,
-		[]btn{{"🔗 获取 Relay 描述文件", "ios_profile"}},
 		[]btn{{"🤖 Android 接入方法", "android_guide"}},
 		[]btn{{"« 返回主菜单", "menu"}},
 	)
@@ -1237,38 +1234,6 @@ func (b *Bot) doRollback(ctx context.Context, v view, tag string) {
 }
 
 // ---------- 描述文件 ----------
-
-// sendProfile 把描述文件作为文档发出。
-//
-// 文件必须新发一条消息（无法编辑既有消息为文档），
-// 因此这里保留原菜单，另外附上文件。
-func (b *Bot) sendProfile(ctx context.Context, v view) {
-	if b.Manager.ProfileBytes == nil {
-		b.render(ctx, v, "<b>获取失败</b>\n\n描述文件生成器未就绪。", backTo("client"))
-		return
-	}
-	data, err := b.Manager.ProfileBytes()
-	if err != nil {
-		b.render(ctx, v, errBox("生成失败", err), backTo("client"))
-		return
-	}
-
-	caption := "<b>iOS Relay 描述文件</b>\n\n" +
-		"1. 先删除旧的 5gpn 描述文件（含蜂窝 DNS 模式）\n" +
-		"2. 点击上方文件并选择下载\n" +
-		"3. 打开 设置 → 通用 → VPN 与设备管理并安装\n\n" +
-		"<i>⚠️ Network Relay 同时作用于蜂窝和 Wi-Fi；Token 与网关身份保持不变。</i>"
-
-	if err := b.sendDocument(ctx, v.chatID, "5gpn-next.mobileconfig", data, caption); err != nil {
-		b.render(ctx, v, errBox("发送失败", err), backTo("client"))
-		return
-	}
-	b.render(ctx, v, "<b>客户端接入</b>\n\nRelay 描述文件已发送，请查看上方文件。",
-		inlineKeyboard(
-			[]btn{{"重新获取", "ios_profile"}},
-			[]btn{{"返回主菜单", "menu"}},
-		))
-}
 
 // sendDNSProfile 下发「蜂窝 DNS 模式」描述文件。
 func (b *Bot) sendDNSProfile(ctx context.Context, v view) {

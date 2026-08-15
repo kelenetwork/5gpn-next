@@ -56,15 +56,6 @@ func TestDNSProfileStableIdentity(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Fatal("same host must produce byte-identical dns profile")
 	}
-	// 与 Relay 描述文件的 UUID/Identifier 必须不同，否则会互相顶掉。
-	relay := Default("kfc.example.com", 20443)
-	rb, err := relay.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(rb), o.ProfileIdentifier) {
-		t.Fatal("dns profile identifier must differ from relay profile")
-	}
 }
 
 func TestDNSProfileRequiresHost(t *testing.T) {

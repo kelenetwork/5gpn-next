@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,7 +20,6 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/egress"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/dot"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/hint"
-	"github.com/kelenetwork/5gpn-next/internal/ingress/relay"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/sniff"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
 	"github.com/kelenetwork/5gpn-next/internal/mitm"
@@ -34,48 +32,15 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/trace"
 	"github.com/kelenetwork/5gpn-next/internal/update"
 	"github.com/kelenetwork/5gpn-next/internal/web"
-	"golang.org/x/net/http2"
 )
 
 var version = "dev"
-
-// ensureExtendedConnect 保证 GODEBUG 里带 http2xconnect=1。
-//
-// x/net/http2 默认关闭 Extended CONNECT（RFC 8441），而 iOS Relay 的
-// connect-udp（QUIC 等 UDP 流量）必须依赖它；该开关在 http2 包 init()
-// 时读取，等 main() 执行已经晚了，因此只能带着环境变量重新 exec 自身。
-// systemd 单元里也会显式设置，此处只是兜底，保证手动启动同样生效。
-func ensureExtendedConnect() {
-	if strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=1") {
-		return
-	}
-	// 防重入：exec 失败或环境异常时绝不无限重启
-	if os.Getenv("FIVEGPN_XCONNECT_REEXEC") == "1" {
-		log.Printf("警告: 未能启用 HTTP/2 Extended CONNECT，UDP(QUIC) 代理不可用")
-		return
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	godebug := "http2xconnect=1"
-	if old := os.Getenv("GODEBUG"); old != "" {
-		godebug = old + "," + godebug
-	}
-	env := append(os.Environ(), "GODEBUG="+godebug, "FIVEGPN_XCONNECT_REEXEC=1")
-	if err := syscall.Exec(exe, os.Args, env); err != nil {
-		log.Printf("警告: 启用 Extended CONNECT 失败: %v（UDP 代理不可用）", err)
-	}
-}
 
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
-	}
-	if os.Args[1] == "run" {
-		ensureExtendedConnect()
 	}
 
 	cmd := os.Args[1]
@@ -334,64 +299,54 @@ func cmdRun(args []string) error {
 		}
 	}
 
+	// 蜂窝 DNS 描述文件：唯一的 iOS 接入方式。
+	// 沿用配置里原有的随机下载路径，保证已有安装链接不失效。
+	profilePath := a.cfg.Relay.ProfilePath
 	var profBytes []byte
-	if a.cfg.Relay.ProfilePath != "" {
-		opts := profile.Default(a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
-		opts.Token = a.cfg.Relay.Token
-		opts.ExcludedDomains = a.cfg.ExcludedDomains
-		if spoofer != nil {
-			opts.RootCADER = spoofer.CACertDER()
-		}
-		if b, err := opts.Build(); err == nil {
-			profBytes = b
-		}
-	}
-
-	// 蜂窝 DNS 模式描述文件：与 Relay 共用同一随机下载目录，文件名区分。
-	// 依赖 DoT 入口，因此仅在 Android 支持（即 DoT）开启时提供。
-	dnsProfilePath := dnsProfilePathOf(a.cfg.Relay.ProfilePath)
-	var dnsProfBytes []byte
-	if dnsProfilePath != "" && a.cfg.Android.Enabled {
+	if profilePath != "" && a.cfg.Android.Enabled {
 		o := profile.DefaultDNS(a.cfg.Relay.Host)
 		if a.cfg.Android.GatewayIP != "" {
 			o.ServerAddresses = []string{a.cfg.Android.GatewayIP}
 		}
+		if spoofer != nil {
+			o.RootCADER = spoofer.CACertDER()
+		}
 		if b, err := o.Build(); err == nil {
-			dnsProfBytes = b
+			profBytes = b
 		}
 	}
-	if dnsProfBytes == nil {
-		dnsProfilePath = ""
+	if profBytes == nil {
+		profilePath = ""
 	}
 
-	srv := &relay.Server{
-		Token:           a.cfg.Relay.Token,
-		Recorder:        rec,
-		Identity:        a.cfg.Relay.Host,
-		ProfilePath:     a.cfg.Relay.ProfilePath,
-		ProfileBytes:    profBytes,
-		DNSProfilePath:  dnsProfilePath,
-		DNSProfileBytes: dnsProfBytes,
-	}
-	if spoofer != nil {
-		srv.LocationSpoof = spoofer
-	}
-	srv.SetRuntime(a.engine, a.reg)
+	// 运行态：策略引擎与出口注册表，热重载时原子替换指针。
+	rt := &gatewayRuntime{}
+	rt.SetRuntime(a.engine, a.reg)
+	dnsStats := &dnsCounters{}
 
-	// 不能用 http.ServeMux 包裹 Relay。
-	// CONNECT 是 authority-form 请求（r.URL.Path 为空），ServeMux 会判定需要
-	// 规范化并回 301 Moved Permanently，隧道永远建立不起来。
-	// 因此这里手写分发：非 CONNECT 且命中管理路径时才走管理处理器。
 	// 管理层：Bot 与 Web 面板共用同一套动作实现
 	mgr := manage.New(cfgPath, a.cfg, a.engine, a.reg)
-	mgr.Stats = statsSnapshot{srv}
-	if a.cfg.Relay.ProfilePath != "" {
-		mgr.ProfileURL = fmt.Sprintf("https://%s:%d%s",
-			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), a.cfg.Relay.ProfilePath)
+	// 计数器分散在 sniff（连接级）与 DoT（查询级），用闭包延迟聚合。
+	var sniffSrv *sniff.Server
+	snapshot := func() map[string]int64 {
+		out := map[string]int64{
+			"dns_query":  dnsStats.Query.Load(),
+			"dns_direct": dnsStats.Direct.Load(),
+			"dns_proxy":  dnsStats.Proxy.Load(),
+			"dns_block":  dnsStats.Block.Load(),
+		}
+		if sniffSrv != nil {
+			out["handled"] = sniffSrv.Handled.Load()
+			out["dial_fail"] = sniffSrv.Failed.Load()
+			out["no_host"] = sniffSrv.NoHost.Load()
+			out["hinted"] = sniffSrv.Hinted.Load()
+		}
+		return out
 	}
-	if dnsProfilePath != "" {
+	mgr.Stats = statsFunc(snapshot)
+	if profilePath != "" {
 		mgr.DNSProfileURL = fmt.Sprintf("https://%s:%d%s",
-			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), dnsProfilePath)
+			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), profilePath)
 	}
 	// 流量统计：只保留聚合数据，不落原始访问日志
 	traffic := stats.New("/var/lib/5gpn-next/traffic.json")
@@ -399,23 +354,12 @@ func cmdRun(args []string) error {
 	trafficDone := make(chan struct{})
 	defer close(trafficDone)
 	go traffic.RunFlusher(trafficDone, 60*time.Second)
-	srv.OnConn = traffic.Conn
 
 	// 版本管理
 	updater := update.New(version)
 	mgr.Updater = updater
 
 	// 描述文件生成器：供 Bot 直接以文件形式下发
-	mgr.ProfileBytes = func() ([]byte, error) {
-		o := profile.Default(a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen))
-		o.Token = a.cfg.Relay.Token
-		o.ExcludedDomains = a.cfg.ExcludedDomains
-		if spoofer != nil {
-			o.RootCADER = spoofer.CACertDER()
-		}
-		return o.Build()
-	}
-	mgr.Location = spoofer
 	if a.cfg.Android.Enabled {
 		mgr.DNSProfileBytes = func() ([]byte, error) {
 			o := profile.DefaultDNS(a.cfg.Relay.Host)
@@ -446,7 +390,7 @@ func cmdRun(args []string) error {
 		// 原子替换指针；绝不复制含 sync.RWMutex 的结构体。
 		// Manager 的运行态由调用方（Manager 内部）装配，
 		// 这里不得回调 mgr 的加锁方法，避免死锁。
-		srv.SetRuntime(nb.engine, nb.reg)
+		rt.SetRuntime(nb.engine, nb.reg)
 		a.engine, a.reg, a.cfg = nb.engine, nb.reg, nb.cfg
 		return nb.engine, nb.reg, nil
 	}
@@ -537,11 +481,18 @@ func cmdRun(args []string) error {
 		hints := hint.New()
 
 		sn := &sniff.Server{
-			Policy:     srv.Policy,
-			Egress:     srv.Egress,
+			Policy:     rt.Policy,
+			Egress:     rt.Egress,
 			Recorder:   rec,
 			OnConn:     traffic.Conn,
 			HintLookup: hints.Lookup,
+		}
+		sniffSrv = sn
+		// 定位修改在蜂窝 DNS 模式下同样可用：
+		// gs-loc.apple.com 不在 cn-domain 名单，会被 DoT 改写到网关，
+		// 流量落到 sniff 监听的 443，在那里从 SNI 还原域名后改写坐标。
+		if spoofer != nil {
+			sn.LocationSpoof = spoofer
 		}
 		go func() {
 			if e := sn.ListenAndServe(ingressCtx, a.cfg.Android.TLSListen, true); e != nil {
@@ -562,7 +513,8 @@ func cmdRun(args []string) error {
 			Upstream:   a.cfg.Android.Upstream,
 			CertFile:   a.cfg.Relay.CertFile,
 			KeyFile:    a.cfg.Relay.KeyFile,
-			Policy:     srv.Policy,
+			Policy:     rt.Policy,
+			OnDecision: func(_ string, action string) { dnsStats.record(action) },
 		}
 		go func() {
 			if e := ds.ListenAndServe(ingressCtx); e != nil {
@@ -632,45 +584,16 @@ func cmdRun(args []string) error {
 		}
 	}
 
-	statsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.cfg.Relay.Token != "" && r.Header.Get(relay.TokenHeader) != a.cfg.Relay.Token {
-			http.Error(w, "forbidden", http.StatusProxyAuthRequired)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"version":     version,
-			"connect":     srv.Stats.Connect.Load(),
-			"blocked":     srv.Stats.Blocked.Load(),
-			"auth_fail":   srv.Stats.AuthFail.Load(),
-			"dial_fail":   srv.Stats.DialFail.Load(),
-			"v6_fastfail": srv.Stats.V6FastFail.Load(),
-			"pvd":         srv.Stats.PvD.Load(),
-			"udp_attempt": srv.Stats.UDPAttempt.Load(),
-			"rules":       a.engine.Len(),
-			"egress":      a.reg.Names(),
-		})
-	})
-
-	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodConnect {
-			switch {
-			case r.URL.Path == "/5gpn/stats":
-				statsHandler.ServeHTTP(w, r)
-				return
-			// PvD 与描述文件下载仍由 Relay 处理
-			case strings.HasPrefix(r.URL.Path, "/.well-known/"):
-			case a.cfg.Relay.ProfilePath != "" && r.URL.Path == a.cfg.Relay.ProfilePath:
-			case dnsProfilePath != "" && r.URL.Path == dnsProfilePath:
-			default:
-				if panelHandler != nil {
-					panelHandler.ServeHTTP(w, r)
-					return
-				}
-			}
-		}
-		srv.ServeHTTP(w, r)
-	})
+	// HTTPS 端点：描述文件下载、内网面板、运行状态。
+	// 删除 Relay 后不再需要处理 CONNECT，也不再有 PvD 端点。
+	root := &httpService{
+		ProfilePath:  profilePath,
+		ProfileBytes: profBytes,
+		Panel:        panelHandler,
+		Stats:        snapshot,
+		Runtime:      rt,
+		Version:      version,
+	}
 
 	cert, err := tls.LoadX509KeyPair(a.cfg.Relay.CertFile, a.cfg.Relay.KeyFile)
 	if err != nil {
@@ -687,17 +610,6 @@ func cmdRun(args []string) error {
 			NextProtos:   []string{"h2", "http/1.1"},
 		},
 		IdleTimeout: 5 * time.Minute,
-	}
-	// Apple Relay 通过长连接承载大量 CONNECT stream。x/net/http2 默认
-	// 每个 stream 给 1MiB 接收窗口，Speedtest 瞬间枚举数千节点时会迅速
-	// 撑爆 256MiB cgroup。限制并发并把每流窗口收紧到 64KiB。
-	if err := http2.ConfigureServer(hs, &http2.Server{
-		MaxConcurrentStreams:         128,
-		MaxUploadBufferPerConnection: 1 << 20,
-		MaxUploadBufferPerStream:     64 << 10,
-		IdleTimeout:                  5 * time.Minute,
-	}); err != nil {
-		return fmt.Errorf("配置 HTTP/2 Relay 失败: %w", err)
 	}
 
 	go func() {
@@ -744,31 +656,19 @@ func cmdProbe(args []string) error {
 func cmdProfile(args []string) error {
 	cfgPath := flagValue(args, "-c", "/etc/5gpn-next/config.json")
 	out := flagValue(args, "-o", "")
-	mode := flagValue(args, "-mode", "relay")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
 	}
-
-	var b []byte
-	switch mode {
-	case "relay":
-		opts := profile.Default(cfg.Relay.Host, portOf(cfg.Relay.Listen))
-		opts.Token = cfg.Relay.Token
-		opts.ExcludedDomains = cfg.ExcludedDomains
-		b, err = opts.Build()
-	case "dns":
-		if !cfg.Android.Enabled {
-			return fmt.Errorf("蜂窝 DNS 模式依赖 DoT 入口，请先启用 android.enabled")
-		}
-		o := profile.DefaultDNS(cfg.Relay.Host)
-		if cfg.Android.GatewayIP != "" {
-			o.ServerAddresses = []string{cfg.Android.GatewayIP}
-		}
-		b, err = o.Build()
-	default:
-		return fmt.Errorf("未知模式 %q，可选 relay | dns", mode)
+	if !cfg.Android.Enabled {
+		return fmt.Errorf("描述文件依赖 DoT 入口，请先启用 android.enabled")
 	}
+
+	o := profile.DefaultDNS(cfg.Relay.Host)
+	if cfg.Android.GatewayIP != "" {
+		o.ServerAddresses = []string{cfg.Android.GatewayIP}
+	}
+	b, err := o.Build()
 	if err != nil {
 		return err
 	}
@@ -779,14 +679,7 @@ func cmdProfile(args []string) error {
 	if err := os.WriteFile(out, b, 0o600); err != nil {
 		return err
 	}
-	switch mode {
-	case "relay":
-		fmt.Printf("已生成 %s（Relay 模式）\n  relay = https://%s:%d/\n  手机本地直连域名 = %d 条\n",
-			out, cfg.Relay.Host, portOf(cfg.Relay.Listen),
-			len(profile.EffectiveExcludedDomains(cfg.ExcludedDomains)))
-	case "dns":
-		fmt.Printf("已生成 %s（蜂窝 DNS 模式）\n  DoT = %s:853\n  仅蜂窝启用，Wi-Fi 不受影响\n", out, cfg.Relay.Host)
-	}
+	fmt.Printf("已生成 %s\n  DoT = %s:853\n  仅蜂窝数据启用，Wi-Fi 不受影响\n", out, cfg.Relay.Host)
 	return nil
 }
 
@@ -902,21 +795,6 @@ func cmdNodeConfig(args []string) error {
 		fmt.Printf("  备注名: %s\n", n.Name)
 	}
 	return nil
-}
-
-// statsSnapshot 把 relay 的计数器适配为 manage.StatsSource。
-type statsSnapshot struct{ srv *relay.Server }
-
-func (s statsSnapshot) Snapshot() map[string]int64 {
-	return map[string]int64{
-		"connect":     s.srv.Stats.Connect.Load(),
-		"blocked":     s.srv.Stats.Blocked.Load(),
-		"auth_fail":   s.srv.Stats.AuthFail.Load(),
-		"dial_fail":   s.srv.Stats.DialFail.Load(),
-		"v6_fastfail": s.srv.Stats.V6FastFail.Load(),
-		"pvd":         s.srv.Stats.PvD.Load(),
-		"udp_attempt": s.srv.Stats.UDPAttempt.Load(),
-	}
 }
 
 // markStartupNotified 判断本次启动是否需要推送启动通知。

@@ -47,6 +47,12 @@ type Server struct {
 	Recorder Recorder
 	OnConn   ConnStat
 
+	// LocationSpoof 提供定位改写；为 nil 时所有流量正常透传，不做任何解密。
+	//
+	// 蜂窝 DNS 模式下 gs-loc.apple.com 会被 DoT 改写到网关，
+	// 流量落到本包监听的 443，此处从 SNI 还原域名后即可改写坐标。
+	LocationSpoof LocationSpoofer
+
 	// HintLookup 返回该客户端最近经 DoT 被改写到网关的域名（可为空）。
 	// 无 SNI 私有协议（如 WhatsApp Noise）嗅探失败时用它回退还原目的地；
 	// 只作兜底，绝不覆盖显式嗅探结果。
@@ -182,6 +188,26 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	defer up.Close()
 	s.Handled.Add(1)
 	tr.Step(trace.StageConnect, trace.StatusOK, "TCP %s 已建立", up.RemoteAddr())
+
+	// ---- 定位改写（仅白名单域名，且功能已开启）----
+	//
+	// 命中时本地终止 TLS 并改写 WLOC 响应；其余流量走下方普通转发，
+	// 绝不解密。预读的 ClientHello 字节需随 bufferedConn 交给 TLS 层。
+	if sp := s.LocationSpoof; sp != nil && isTLS && !hinted && sp.Active() && sp.Handles(host) {
+		tr.Step(trace.StageApp, trace.StatusOK, "定位改写：终止 TLS 并重写坐标")
+		if err := sp.Serve(newBufferedConn(cli, br), up, host); err != nil {
+			tr.Fail(trace.StageApp, err, "定位改写失败，连接已关闭（客户端将退回真实定位）")
+			if s.OnConn != nil {
+				s.OnConn(host, actionName, 0, 0, true)
+			}
+			return
+		}
+		tr.Step(trace.StageApp, trace.StatusOK, "定位改写完成")
+		if s.OnConn != nil {
+			s.OnConn(host, actionName, 0, 0, false)
+		}
+		return
+	}
 
 	// 双向转发；br 中已读出的首包（含无法解析的私有协议字节）需要一并送出
 	var upN, downN int64
