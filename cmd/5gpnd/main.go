@@ -136,6 +136,13 @@ func setup(cfgPath string, loadRules bool) (*app, error) {
 		return nil, err
 	}
 
+	// prefer_ipv4：让所有出口对 IPv6 字面量目标 0ms 快速失败。
+	//
+	// 生产实测：经 mihomo 代拨的 IPv6 对 Meta 这类多 edge 服务往往只是
+	// "部分可达"，坏 edge 每个都要等一个看门狗周期；而完全没有 IPv6 的
+	// 出口反而更快（用户实测 KFC 明显快于 usatt）。默认开启。
+	v6Allowed := !cfg.IPv4Preferred()
+
 	reg := egress.NewRegistry()
 	for _, e := range cfg.Egress {
 		switch e.Type {
@@ -144,8 +151,11 @@ func setup(cfgPath string, loadRules bool) (*app, error) {
 				reg.Register(egress.NewDirect(e.Name))
 			}
 		case "socks5":
-			reg.Register(egress.NewSocks5(e.Name, e.Addr, e.HasIPv6))
+			reg.Register(egress.NewSocks5(e.Name, e.Addr, e.HasIPv6 && v6Allowed))
 		}
+	}
+	if !v6Allowed {
+		reg.SetDirectIPv6(false)
 	}
 
 	eng := policy.New()

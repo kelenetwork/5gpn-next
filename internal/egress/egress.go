@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -83,6 +84,16 @@ func probeLocalIPv6() bool {
 	}
 	c.Close()
 	return true
+}
+
+// isIPv6Literal 判断 host:port 中的 host 是否为 IPv6 字面量。
+func isIPv6Literal(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	return err == nil && ip.Unmap().Is6()
 }
 
 // guardIPv6 在出口无 v6 能力时对 IPv6 字面量目标快速失败。
@@ -158,7 +169,12 @@ func (s *Socks5) DialContext(ctx context.Context, network, addr string) (net.Con
 	// mihomo 会先乐观回复 CONNECT 成功再去连上游，上游不可达时静默挂死。
 	// 用首字节看门狗兜底：客户端发数据后上游久无响应即断开，
 	// 促使 App 快速改试下一个地址（WhatsApp 轮询多个 Meta edge 的关键）。
-	g := NewFirstByteGuard(c, FirstByteTimeout)
+	// IPv6 目标用更短的看门狗：失败后 iOS 会立刻改试 IPv4
+	wd := FirstByteTimeout
+	if isIPv6Literal(addr) {
+		wd = v6WatchdogTimeout
+	}
+	g := NewFirstByteGuard(c, wd)
 	target := addr
 	g.OnTimeout = func() {
 		if s.bad != nil {
@@ -261,6 +277,16 @@ func socks5Handshake(c net.Conn, target string) error {
 //
 // 因此必须做端到端验证：完成一次真实 TLS 握手，证明**双向**有数据流动。
 func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {
+	// 全部目标都通才算具备 IPv6 能力（部分可达按不可用处理）
+	for _, t := range probeV6Targets {
+		if !probeSocks5IPv6One(addr, t, timeout) {
+			return false
+		}
+	}
+	return true
+}
+
+func probeSocks5IPv6One(addr string, target struct{ Addr, SNI string }, timeout time.Duration) bool {
 	d := net.Dialer{Timeout: timeout}
 	c, err := d.Dial("tcp", addr)
 	if err != nil {
@@ -276,7 +302,7 @@ func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {
 	if _, err := readFull(c, rep); err != nil || rep[0] != 0x05 || rep[1] != 0x00 {
 		return false
 	}
-	ip := netip.MustParseAddr(probeV6Addr).As16()
+	ip := netip.MustParseAddr(target.Addr).As16()
 	req := append([]byte{0x05, 0x01, 0x00, 0x04}, ip[:]...)
 	req = append(req, 0x01, 0xbb) // 443
 	if _, err := c.Write(req); err != nil {
@@ -309,7 +335,7 @@ func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {
 	// 关键一步：真实 TLS 握手。握手成功 = 上游确实连通且双向可传数据。
 	// 只验证「通」，不验证证书链（探测目标固定且不传输任何敏感数据）。
 	tc := tls.Client(c, &tls.Config{
-		ServerName:         probeV6SNI,
+		ServerName:         target.SNI,
 		InsecureSkipVerify: true, //nolint:gosec // 连通性探测，非信任判定
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -317,11 +343,26 @@ func ProbeSocks5IPv6(addr string, timeout time.Duration) bool {
 	return tc.HandshakeContext(ctx) == nil
 }
 
-const (
-	// probeV6Addr 是 IPv6 连通性探测目标（Cloudflare anycast，全球可达）
-	probeV6Addr = "2606:4700:4700::1111"
-	probeV6SNI  = "one.one.one.one"
-)
+// probeV6Targets 是 IPv6 能力探测目标集合。
+//
+// ⚠️ 只测单个 anycast 目标会得出过于乐观的结论：生产实测中 usatt 对
+// Cloudflare v6 可达，但对 Meta 的多数 edge 不可达。此时声称
+// "具备 IPv6" 反而更糟 —— iOS 会优先走 IPv6，逐个坏 edge 各等一个
+// 看门狗周期；而干脆没有 IPv6 时全部 0ms 快速失败，客户端立刻改用
+// 实测可用的 IPv4 路径（用户实测：无 v6 的 KFC 出口明显更快）。
+//
+// 因此改为多目标探测，且要求**全部通过**才判定具备 IPv6 能力。
+var probeV6Targets = []struct{ Addr, SNI string }{
+	{"2606:4700:4700::1111", "one.one.one.one"},                // Cloudflare
+	{"2001:4860:4860::8888", "dns.google"},                     // Google
+	{"2a03:2880:f10f:83:face:b00c:0:25de", "www.whatsapp.net"}, // Meta edge（代表性最强）
+}
+
+// v6WatchdogTimeout 是 IPv6 目标的首字节上限，明显短于 IPv4。
+//
+// IPv6 失败时 iOS 的 Happy Eyeballs 会立刻改试 IPv4，因此这里宁可早断：
+// 与其为坏 edge 等满 6 秒，不如 2 秒放行客户端去走可用的 v4 路径。
+const v6WatchdogTimeout = 2 * time.Second
 
 func readFull(c net.Conn, b []byte) (int, error) {
 	total := 0
@@ -389,6 +430,18 @@ func (r *Registry) HasProxy() bool {
 		}
 	}
 	return false
+}
+
+// SetDirectIPv6 覆盖 DIRECT 出口的 IPv6 能力声明。
+//
+// prefer_ipv4 开启时置 false，让 IPv6 字面量目标 0ms 快速失败，
+// 促使客户端 Happy Eyeballs 立即改用实测可用的 IPv4 路径。
+func (r *Registry) SetDirectIPv6(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d, ok := r.direct.(*Direct); ok {
+		d.hasV6 = v
+	}
 }
 
 // Direct 返回直出出口。

@@ -36,6 +36,16 @@ type Config struct {
 	// 手机侧直连域名（写进描述文件 ExcludedDomains）
 	ExcludedDomains []string `json:"excluded_domains"`
 
+	// PreferIPv4 让所有出口对 IPv6 字面量目标立即快速失败（0ms），
+	// 促使客户端 Happy Eyeballs 直接改用 IPv4。
+	//
+	// 生产实测结论：经 mihomo 代拨的 IPv6 对 Meta 这类多 edge 服务往往
+	// 只是「部分可达」，坏 edge 每个都要等一个看门狗周期；而完全没有
+	// IPv6 的出口反而更快（用户实测 KFC 明显快于 usatt）。因此默认开启。
+	//
+	// 置 false 可恢复 IPv6 代拨（出口具备完整 v6 能力时更优）。
+	PreferIPv4 *bool `json:"prefer_ipv4,omitempty"`
+
 	// Telegram Bot（可选）
 	Bot BotConfig `json:"bot"`
 
@@ -150,6 +160,7 @@ func Default() *Config {
 		// 不进配置文件，用户无法误删。
 		Rules:      nil,
 		Final:      "direct",
+		PreferIPv4: boolPtr(true),
 		ClientCIDR: "172.22.0.0/16",
 		Panel:      PanelConfig{Enabled: true},
 		Android: AndroidConfig{
@@ -217,6 +228,16 @@ func normalizeRule(r string) string {
 		parts[i] = strings.TrimSpace(parts[i])
 	}
 	return strings.ToUpper(strings.Join(parts, ","))
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// IPv4Preferred 报告是否强制 IPv4 优先（未配置时默认 true）。
+func (c *Config) IPv4Preferred() bool {
+	if c.PreferIPv4 == nil {
+		return true
+	}
+	return *c.PreferIPv4
 }
 
 // Load 从文件读取配置。
