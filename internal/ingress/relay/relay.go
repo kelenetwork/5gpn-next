@@ -56,9 +56,13 @@ type Server struct {
 	pol atomic.Pointer[policy.Engine]
 	eg  atomic.Pointer[egress.Registry]
 
-	// ProfilePath / ProfileBytes 提供描述文件下载端点（可为空）
+	// ProfilePath / ProfileBytes 提供 Relay 描述文件下载端点（可为空）
 	ProfilePath  string
 	ProfileBytes []byte
+
+	// DNSProfilePath / DNSProfileBytes 提供「蜂窝 DNS 模式」描述文件（可为空）
+	DNSProfilePath  string
+	DNSProfileBytes []byte
 
 	// OnConn 在每条连接结束时上报流量与结果，供统计使用（可为空）。
 	// host 为域名或裸 IP，action 取 direct / proxy / block。
@@ -89,6 +93,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-apple-aspen-config")
 		w.Header().Set("Content-Disposition", `attachment; filename="5gpn-next.mobileconfig"`)
 		w.Write(s.ProfileBytes)
+		return
+	}
+	if s.DNSProfilePath != "" && r.Method == http.MethodGet && r.URL.Path == s.DNSProfilePath {
+		w.Header().Set("Content-Type", "application/x-apple-aspen-config")
+		w.Header().Set("Content-Disposition", `attachment; filename="5gpn-next-dns.mobileconfig"`)
+		w.Write(s.DNSProfileBytes)
 		return
 	}
 

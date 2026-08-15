@@ -272,12 +272,31 @@ func cmdRun(args []string) error {
 		}
 	}
 
+	// 蜂窝 DNS 模式描述文件：与 Relay 共用同一随机下载目录，文件名区分。
+	// 依赖 DoT 入口，因此仅在 Android 支持（即 DoT）开启时提供。
+	dnsProfilePath := dnsProfilePathOf(a.cfg.Relay.ProfilePath)
+	var dnsProfBytes []byte
+	if dnsProfilePath != "" && a.cfg.Android.Enabled {
+		o := profile.DefaultDNS(a.cfg.Relay.Host)
+		if a.cfg.Android.GatewayIP != "" {
+			o.ServerAddresses = []string{a.cfg.Android.GatewayIP}
+		}
+		if b, err := o.Build(); err == nil {
+			dnsProfBytes = b
+		}
+	}
+	if dnsProfBytes == nil {
+		dnsProfilePath = ""
+	}
+
 	srv := &relay.Server{
-		Token:        a.cfg.Relay.Token,
-		Recorder:     rec,
-		Identity:     a.cfg.Relay.Host,
-		ProfilePath:  a.cfg.Relay.ProfilePath,
-		ProfileBytes: profBytes,
+		Token:           a.cfg.Relay.Token,
+		Recorder:        rec,
+		Identity:        a.cfg.Relay.Host,
+		ProfilePath:     a.cfg.Relay.ProfilePath,
+		ProfileBytes:    profBytes,
+		DNSProfilePath:  dnsProfilePath,
+		DNSProfileBytes: dnsProfBytes,
 	}
 	srv.SetRuntime(a.engine, a.reg)
 
@@ -291,6 +310,10 @@ func cmdRun(args []string) error {
 	if a.cfg.Relay.ProfilePath != "" {
 		mgr.ProfileURL = fmt.Sprintf("https://%s:%d%s",
 			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), a.cfg.Relay.ProfilePath)
+	}
+	if dnsProfilePath != "" {
+		mgr.DNSProfileURL = fmt.Sprintf("https://%s:%d%s",
+			a.cfg.Relay.Host, portOf(a.cfg.Relay.Listen), dnsProfilePath)
 	}
 	// 流量统计：只保留聚合数据，不落原始访问日志
 	traffic := stats.New("/var/lib/5gpn-next/traffic.json")
@@ -310,6 +333,15 @@ func cmdRun(args []string) error {
 		o.Token = a.cfg.Relay.Token
 		o.ExcludedDomains = a.cfg.ExcludedDomains
 		return o.Build()
+	}
+	if a.cfg.Android.Enabled {
+		mgr.DNSProfileBytes = func() ([]byte, error) {
+			o := profile.DefaultDNS(a.cfg.Relay.Host)
+			if a.cfg.Android.GatewayIP != "" {
+				o.ServerAddresses = []string{a.cfg.Android.GatewayIP}
+			}
+			return o.Build()
+		}
 	}
 	mgr.AndroidInfo = func() manage.AndroidGuide {
 		g := manage.AndroidGuide{
@@ -526,6 +558,7 @@ func cmdRun(args []string) error {
 			// PvD 与描述文件下载仍由 Relay 处理
 			case strings.HasPrefix(r.URL.Path, "/.well-known/"):
 			case a.cfg.Relay.ProfilePath != "" && r.URL.Path == a.cfg.Relay.ProfilePath:
+			case dnsProfilePath != "" && r.URL.Path == dnsProfilePath:
 			default:
 				if panelHandler != nil {
 					panelHandler.ServeHTTP(w, r)
@@ -608,14 +641,31 @@ func cmdProbe(args []string) error {
 func cmdProfile(args []string) error {
 	cfgPath := flagValue(args, "-c", "/etc/5gpn-next/config.json")
 	out := flagValue(args, "-o", "")
+	mode := flagValue(args, "-mode", "relay")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
 	}
-	opts := profile.Default(cfg.Relay.Host, portOf(cfg.Relay.Listen))
-	opts.Token = cfg.Relay.Token
-	opts.ExcludedDomains = cfg.ExcludedDomains
-	b, err := opts.Build()
+
+	var b []byte
+	switch mode {
+	case "relay":
+		opts := profile.Default(cfg.Relay.Host, portOf(cfg.Relay.Listen))
+		opts.Token = cfg.Relay.Token
+		opts.ExcludedDomains = cfg.ExcludedDomains
+		b, err = opts.Build()
+	case "dns":
+		if !cfg.Android.Enabled {
+			return fmt.Errorf("蜂窝 DNS 模式依赖 DoT 入口，请先启用 android.enabled")
+		}
+		o := profile.DefaultDNS(cfg.Relay.Host)
+		if cfg.Android.GatewayIP != "" {
+			o.ServerAddresses = []string{cfg.Android.GatewayIP}
+		}
+		b, err = o.Build()
+	default:
+		return fmt.Errorf("未知模式 %q，可选 relay | dns", mode)
+	}
 	if err != nil {
 		return err
 	}
@@ -626,10 +676,28 @@ func cmdProfile(args []string) error {
 	if err := os.WriteFile(out, b, 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("已生成 %s\n  relay = https://%s:%d/\n  手机本地直连域名 = %d 条\n",
-		out, cfg.Relay.Host, portOf(cfg.Relay.Listen),
-		len(profile.EffectiveExcludedDomains(cfg.ExcludedDomains)))
+	switch mode {
+	case "relay":
+		fmt.Printf("已生成 %s（Relay 模式）\n  relay = https://%s:%d/\n  手机本地直连域名 = %d 条\n",
+			out, cfg.Relay.Host, portOf(cfg.Relay.Listen),
+			len(profile.EffectiveExcludedDomains(cfg.ExcludedDomains)))
+	case "dns":
+		fmt.Printf("已生成 %s（蜂窝 DNS 模式）\n  DoT = %s:853\n  仅蜂窝启用，Wi-Fi 不受影响\n", out, cfg.Relay.Host)
+	}
 	return nil
+}
+
+// dnsProfilePathOf 由 Relay 描述文件路径派生 DNS 模式下载路径：
+// 复用同一随机目录（能力凭证），仅文件名不同。
+func dnsProfilePathOf(relayPath string) string {
+	if relayPath == "" {
+		return ""
+	}
+	i := strings.LastIndex(relayPath, "/")
+	if i < 0 {
+		return ""
+	}
+	return relayPath[:i+1] + "5gpn-next-dns.mobileconfig"
 }
 
 // ---------- 小工具 ----------

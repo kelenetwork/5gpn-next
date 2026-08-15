@@ -45,8 +45,10 @@ type Manager struct {
 	Egress     *egress.Registry
 	Stats      StatsSource
 
-	// ProfileURL 是描述文件下载地址，供前端展示
+	// ProfileURL 是 Relay 描述文件下载地址，供前端展示
 	ProfileURL string
+	// DNSProfileURL 是「蜂窝 DNS 模式」描述文件下载地址（可为空）
+	DNSProfileURL string
 
 	// Reload 由主程序注入：配置变更后重建策略与出口，
 	// 返回新的运行态由 Manager 自行装配。
@@ -59,8 +61,10 @@ type Manager struct {
 	// Updater 负责版本检查/升级/回退（可为空）
 	Updater *update.Manager
 
-	// ProfileBytes 返回当前 iOS 描述文件内容，供 Bot 以文件形式下发
+	// ProfileBytes 返回当前 iOS Relay 描述文件内容，供 Bot 以文件形式下发
 	ProfileBytes func() ([]byte, error)
+	// DNSProfileBytes 返回「蜂窝 DNS 模式」描述文件；未启用 DoT 时为 nil
+	DNSProfileBytes func() ([]byte, error)
 
 	// AndroidInfo 返回 Android 接入所需信息
 	AndroidInfo func() AndroidGuide

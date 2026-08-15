@@ -395,6 +395,8 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 
 	case cmd == "ios_profile":
 		b.sendProfile(ctx, v)
+	case cmd == "ios_dns_profile":
+		b.sendDNSProfile(ctx, v)
 	case cmd == "android_guide":
 		b.showAndroid(ctx, v)
 	case cmd == "update_check":
@@ -844,16 +846,21 @@ func (b *Bot) showClient(ctx context.Context, v view) {
 	var sb strings.Builder
 	sb.WriteString("📱 <b>客户端接入</b>\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString("🍎 <b>iPhone / iPad</b>　<i>iOS 17 及以上</i>\n")
-	sb.WriteString("<blockquote>系统级 Network Relay，会同时作用于蜂窝和 Wi-Fi。描述文件内置国内直连名单；其余流量由网关分流。</blockquote>\n")
+	sb.WriteString("🍎 <b>iPhone / iPad</b>　<i>iOS 17 及以上，两种模式二选一</i>\n")
+	sb.WriteString("<blockquote>📡 <b>蜂窝 DNS 模式</b>（推荐）：仅蜂窝数据下生效，Wi-Fi 完全不受影响；国内 IP 手机本地直连。少数无 SNI 私有协议（如 WhatsApp 聊天）可能不兼容。\n\n🔗 <b>Relay 模式</b>：协议覆盖最完整，但同时作用于蜂窝和 Wi-Fi。\n\n两种模式不可同时安装，切换前先删除旧描述文件。</blockquote>\n")
 	sb.WriteString("🤖 <b>Android</b>\n")
 	sb.WriteString("<blockquote>在系统「私人 DNS」中填一个域名即可，同样无需安装应用。</blockquote>")
 
-	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"🍎 获取 iOS 描述文件", "ios_profile"}},
+	rows := [][]btn{}
+	if b.Manager.DNSProfileBytes != nil {
+		rows = append(rows, []btn{{"📡 获取蜂窝 DNS 描述文件（推荐）", "ios_dns_profile"}})
+	}
+	rows = append(rows,
+		[]btn{{"🔗 获取 Relay 描述文件", "ios_profile"}},
 		[]btn{{"🤖 Android 接入方法", "android_guide"}},
 		[]btn{{"« 返回主菜单", "menu"}},
-	))
+	)
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
 func (b *Bot) showPanel(ctx context.Context, v view) {
@@ -1032,8 +1039,8 @@ func (b *Bot) sendProfile(ctx context.Context, v view) {
 		return
 	}
 
-	caption := "<b>iOS 描述文件</b>\n\n" +
-		"1. 先删除同名的旧描述文件\n" +
+	caption := "<b>iOS Relay 描述文件</b>\n\n" +
+		"1. 先删除旧的 5gpn 描述文件（含蜂窝 DNS 模式）\n" +
 		"2. 点击上方文件并选择下载\n" +
 		"3. 打开 设置 → 通用 → VPN 与设备管理并安装\n\n" +
 		"<i>⚠️ Network Relay 同时作用于蜂窝和 Wi-Fi；Token 与网关身份保持不变。</i>"
@@ -1042,9 +1049,39 @@ func (b *Bot) sendProfile(ctx context.Context, v view) {
 		b.render(ctx, v, errBox("发送失败", err), backTo("client"))
 		return
 	}
-	b.render(ctx, v, "<b>客户端接入</b>\n\n描述文件已发送，请查看上方文件。",
+	b.render(ctx, v, "<b>客户端接入</b>\n\nRelay 描述文件已发送，请查看上方文件。",
 		inlineKeyboard(
 			[]btn{{"重新获取", "ios_profile"}},
+			[]btn{{"返回主菜单", "menu"}},
+		))
+}
+
+// sendDNSProfile 下发「蜂窝 DNS 模式」描述文件。
+func (b *Bot) sendDNSProfile(ctx context.Context, v view) {
+	if b.Manager.DNSProfileBytes == nil {
+		b.render(ctx, v, "<b>获取失败</b>\n\n蜂窝 DNS 模式需要启用 android.enabled（DoT 入口）。", backTo("client"))
+		return
+	}
+	data, err := b.Manager.DNSProfileBytes()
+	if err != nil {
+		b.render(ctx, v, errBox("生成失败", err), backTo("client"))
+		return
+	}
+
+	caption := "<b>iOS 蜂窝 DNS 描述文件</b>\n\n" +
+		"1. 先删除旧的 5gpn 描述文件（含 Relay 模式）\n" +
+		"2. 点击上方文件并选择下载\n" +
+		"3. 打开 设置 → 通用 → VPN 与设备管理并安装\n\n" +
+		"<i>✅ 仅蜂窝数据生效，Wi-Fi 完全不受影响；国内 IP 手机本地直连。\n" +
+		"⚠️ 无 SNI 私有协议（如 WhatsApp 聊天）可能不兼容，遇到问题改用 Relay 模式。</i>"
+
+	if err := b.sendDocument(ctx, v.chatID, "5gpn-next-dns.mobileconfig", data, caption); err != nil {
+		b.render(ctx, v, errBox("发送失败", err), backTo("client"))
+		return
+	}
+	b.render(ctx, v, "<b>客户端接入</b>\n\n蜂窝 DNS 描述文件已发送，请查看上方文件。",
+		inlineKeyboard(
+			[]btn{{"重新获取", "ios_dns_profile"}},
 			[]btn{{"返回主菜单", "menu"}},
 		))
 }
