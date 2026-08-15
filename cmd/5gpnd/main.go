@@ -363,6 +363,9 @@ func cmdRun(args []string) error {
 	if a.cfg.Android.Enabled {
 		mgr.DNSProfileBytes = buildProfile
 	}
+	// 定位修改控制面：注入后 Bot 才能开关并设置坐标。
+	// （v0.12.0 删除 Relay 时此行被误删，导致 Bot 显示“不可用”）
+	mgr.Location = spoofer
 	mgr.AndroidInfo = func() manage.AndroidGuide {
 		g := manage.AndroidGuide{
 			Enabled:   a.cfg.Android.Enabled,
