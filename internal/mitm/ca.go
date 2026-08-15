@@ -35,8 +35,34 @@ var AllowedHosts = map[string]bool{
 	"gs-loc-cn.apple.com": true,
 }
 
+// locationSuffix 是 Apple 定位服务的边缘节点域名后缀。
+//
+// 实测发现 iOS 并不总是直连 gs-loc.apple.com，也会把定位查询发给
+// gspe1-ssl.ls.apple.com / gsp10-ssl.ls.apple.com 这类边缘节点
+// （生产 trace: gspe1-ssl.ls.apple.com up=1898B down=4347B，
+// 正是「上传 WiFi 列表、下载坐标」的流量特征）。
+//
+// 只放行 gsp 前缀的定位子域，不覆盖 ls.apple.com 下的其它服务。
+const locationSuffix = ".ls.apple.com"
+
 // Allowed 报告某主机是否在中间人白名单内。
-func Allowed(host string) bool { return AllowedHosts[host] }
+//
+// 两类：精确匹配的 gs-loc 端点，以及 gsp*-ssl.ls.apple.com 边缘节点。
+// 其余一切主机（含 apple.com 本身与 xxx.ls.apple.com.evil.com）一律拒绝。
+func Allowed(host string) bool {
+	if AllowedHosts[host] {
+		return true
+	}
+	if !strings.HasSuffix(host, locationSuffix) {
+		return false
+	}
+	label := host[:len(host)-len(locationSuffix)]
+	// 必须是单段标签（不含点），且以 gsp 开头：gspe1-ssl / gsp10-ssl ...
+	if label == "" || strings.Contains(label, ".") {
+		return false
+	}
+	return strings.HasPrefix(label, "gsp")
+}
 
 // CA 是网关自签根证书颁发机构。
 type CA struct {

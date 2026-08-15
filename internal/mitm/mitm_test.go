@@ -9,16 +9,39 @@ import (
 )
 
 // 白名单是安全边界：只有 Apple 定位服务可被中间人，其余一律拒绝。
+//
+// 生产实测发现 iOS 并不总是直连 gs-loc.apple.com，也会把定位查询发给
+// gspe1-ssl.ls.apple.com 这类边缘节点，因此白名单需覆盖 gsp* 定位子域。
 func TestAllowedHostsIsStrict(t *testing.T) {
-	for _, h := range []string{"gs-loc.apple.com", "gs-loc-cn.apple.com"} {
+	allowed := []string{
+		"gs-loc.apple.com",
+		"gs-loc-cn.apple.com",
+		// 定位边缘节点（实测流量特征：上传 WiFi 列表、下载坐标）
+		"gspe1-ssl.ls.apple.com",
+		"gsp10-ssl.ls.apple.com",
+		"gspe19-cn-ssl.ls.apple.com",
+	}
+	for _, h := range allowed {
 		if !Allowed(h) {
 			t.Errorf("%s should be allowed", h)
 		}
 	}
-	for _, h := range []string{
-		"apple.com", "www.apple.com", "gs-loc.apple.com.evil.com",
-		"evil.com", "", "google.com", "gs-loc.apple.co",
-	} {
+
+	denied := []string{
+		"apple.com", "www.apple.com", "evil.com", "", "google.com",
+		// 后缀伪装：绝不能因为结尾像白名单就放行
+		"gs-loc.apple.com.evil.com",
+		"gspe1-ssl.ls.apple.com.evil.com",
+		"gs-loc.apple.co",
+		// ls.apple.com 下的非定位服务不得解密
+		"ls.apple.com",
+		"init.ls.apple.com",
+		"configuration.ls.apple.com",
+		// 多级子域绕过尝试
+		"evil.gspe1-ssl.ls.apple.com",
+		"gsp.evil.ls.apple.com",
+	}
+	for _, h := range denied {
 		if Allowed(h) {
 			t.Errorf("%s must NOT be allowed for MITM", h)
 		}
@@ -30,11 +53,15 @@ func TestCALeafOnlyForAllowedHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ca.LeafFor("gs-loc.apple.com"); err != nil {
-		t.Fatalf("allowed host must get a leaf: %v", err)
+	for _, h := range []string{"gs-loc.apple.com", "gspe1-ssl.ls.apple.com"} {
+		if _, err := ca.LeafFor(h); err != nil {
+			t.Fatalf("allowed host %s must get a leaf: %v", h, err)
+		}
 	}
-	if _, err := ca.LeafFor("evil.com"); err == nil {
-		t.Fatal("must refuse to sign for non-whitelisted host")
+	for _, h := range []string{"evil.com", "init.ls.apple.com", "gspe1-ssl.ls.apple.com.evil.com"} {
+		if _, err := ca.LeafFor(h); err == nil {
+			t.Fatalf("must refuse to sign for %s", h)
+		}
 	}
 }
 
