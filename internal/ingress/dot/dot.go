@@ -46,6 +46,10 @@ type Server struct {
 	// OnDecision 供统计与日志使用（可为空）
 	OnDecision func(qname, action string)
 
+	// OnRewrite 在 A 记录被改写到网关时回调（client 为客户端 IP）。
+	// 供 sniff 在无 SNI 协议上做“DNS 线索回退”还原目的地（可为空）。
+	OnRewrite func(client, qname string)
+
 	client   *dns.Client
 	cacheMu  sync.RWMutex
 	cache    map[string]cacheEntry
@@ -185,6 +189,11 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 
 	// 其余（proxy 或 FINAL 兜底）：A 记录改写为网关 IP，
 	// 由网关嗅探 SNI 后按当前国外出口（含 KFC 本机出口）转发
+	if s.OnRewrite != nil {
+		if h, _, err := net.SplitHostPort(w.RemoteAddr().String()); err == nil {
+			s.OnRewrite(h, qname)
+		}
+	}
 	m := new(dns.Msg)
 	m.SetReply(req)
 	m.Authoritative = true

@@ -20,6 +20,7 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/egress"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/dot"
+	"github.com/kelenetwork/5gpn-next/internal/ingress/hint"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/relay"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/sniff"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
@@ -435,11 +436,16 @@ func cmdRun(args []string) error {
 			return fmt.Errorf("client_cidr 无效: %w", perr)
 		}
 
+		// DNS 线索表：DoT 改写时记录「客户端→域名」，无 SNI 私有协议
+		// （如 WhatsApp Noise）嗅探失败时用它回退还原目的地。
+		hints := hint.New()
+
 		sn := &sniff.Server{
-			Policy:   srv.Policy,
-			Egress:   srv.Egress,
-			Recorder: rec,
-			OnConn:   traffic.Conn,
+			Policy:     srv.Policy,
+			Egress:     srv.Egress,
+			Recorder:   rec,
+			OnConn:     traffic.Conn,
+			HintLookup: hints.Lookup,
 		}
 		go func() {
 			if e := sn.ListenAndServe(ingressCtx, a.cfg.Android.TLSListen, true); e != nil {
@@ -455,6 +461,7 @@ func cmdRun(args []string) error {
 		ds := &dot.Server{
 			Listen:     a.cfg.Android.DoTListen,
 			GatewayIP:  gwIP,
+			OnRewrite:  hints.Add,
 			ClientCIDR: clientPfx,
 			Upstream:   a.cfg.Android.Upstream,
 			CertFile:   a.cfg.Relay.CertFile,

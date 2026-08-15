@@ -47,9 +47,15 @@ type Server struct {
 	Recorder Recorder
 	OnConn   ConnStat
 
+	// HintLookup 返回该客户端最近经 DoT 被改写到网关的域名（可为空）。
+	// 无 SNI 私有协议（如 WhatsApp Noise）嗅探失败时用它回退还原目的地；
+	// 只作兜底，绝不覆盖显式嗅探结果。
+	HintLookup func(client string) (string, bool)
+
 	Handled atomic.Int64
 	Failed  atomic.Int64
 	NoHost  atomic.Int64
+	Hinted  atomic.Int64
 
 	seq atomic.Uint64
 }
@@ -90,16 +96,28 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	id := fmt.Sprintf("s%d", s.seq.Add(1))
 	_ = cli.SetReadDeadline(time.Now().Add(8 * time.Second))
 
+	client := clientIP(cli.RemoteAddr())
 	br := bufio.NewReaderSize(cli, 8*1024)
 	host, port, err := peekHost(br, isTLS)
+	hinted := false
 	if err != nil {
-		s.NoHost.Add(1)
-		return
+		// 无 SNI/Host：用 DNS 线索回退。客户端建连前必然先经 DoT
+		// 查询过目标域名且被改写到网关，那条查询就是目的地。
+		if s.HintLookup != nil {
+			if h, ok := s.HintLookup(client); ok {
+				host, port, hinted = h, portOfConn(cli), true
+				s.Hinted.Add(1)
+			}
+		}
+		if !hinted {
+			s.NoHost.Add(1)
+			return
+		}
 	}
 	_ = cli.SetReadDeadline(time.Time{})
 
 	target := net.JoinHostPort(host, itoa(port))
-	tr := trace.New(id, target, clientIP(cli.RemoteAddr()))
+	tr := trace.New(id, target, client)
 	defer func() {
 		if s.Recorder != nil {
 			s.Recorder.Record(tr)
@@ -110,7 +128,11 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	if isTLS {
 		proto = "TLS/SNI"
 	}
-	tr.Step(trace.StageIngress, trace.StatusOK, "android %s 嗅探成功", proto)
+	if hinted {
+		tr.Step(trace.StageIngress, trace.StatusOK, "无 SNI，由 DNS 线索还原目标（私有协议兜底）")
+	} else {
+		tr.Step(trace.StageIngress, trace.StatusOK, "android %s 嗅探成功", proto)
+	}
 
 	// 策略判定
 	t, _ := policy.ParseTarget(target)
@@ -161,7 +183,7 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	s.Handled.Add(1)
 	tr.Step(trace.StageConnect, trace.StatusOK, "TCP %s 已建立", up.RemoteAddr())
 
-	// 双向转发；br 中已读出的首包需要一并送出
+	// 双向转发；br 中已读出的首包（含无法解析的私有协议字节）需要一并送出
 	var upN, downN int64
 	done := make(chan struct{}, 2)
 	go func() {
@@ -183,6 +205,14 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	if s.OnConn != nil {
 		s.OnConn(host, actionName, upN, downN, false)
 	}
+}
+
+// portOfConn 返回本地监听端口（即客户端想连的端口）。
+func portOfConn(c net.Conn) int {
+	if a, ok := c.LocalAddr().(*net.TCPAddr); ok && a.Port > 0 {
+		return a.Port
+	}
+	return 443
 }
 
 // peekHost 从首包解析目标域名，且不消费缓冲。
