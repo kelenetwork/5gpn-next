@@ -81,6 +81,19 @@ type DNSConfig struct {
 	TLSListen  string `json:"tls_listen"`
 	// Upstream 是 DNS 上游
 	Upstream []string `json:"upstream"`
+	// QUICTakeover 接管客户端的 QUIC（UDP 443）流量。
+	//
+	// 关闭时回到旧行为：防火墙 reject UDP 443，指望客户端回落 TCP。
+	// 但 Google Play 下载器（Cronet）不回落，只会无限重试 QUIC，
+	// 表现为「下载永远等待中」，因此默认开启。
+	// 指针类型用于区分「未配置」（旧配置文件升级后自动启用）与
+	// 「显式关闭」。
+	QUICTakeover *bool `json:"quic_takeover,omitempty"`
+}
+
+// QUICTakeoverEnabled 报告是否接管 QUIC，未配置时默认开启。
+func (d DNSConfig) QUICTakeoverEnabled() bool {
+	return d.QUICTakeover == nil || *d.QUICTakeover
 }
 
 // UpdateConfig 是更新检查配置。

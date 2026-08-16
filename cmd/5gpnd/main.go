@@ -18,8 +18,10 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/bot"
 	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/egress"
+	"github.com/kelenetwork/5gpn-next/internal/fw"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/dot"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/hint"
+	"github.com/kelenetwork/5gpn-next/internal/ingress/quicfwd"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/sniff"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
 	"github.com/kelenetwork/5gpn-next/internal/node"
@@ -161,9 +163,13 @@ func loadRuleSets(cfg *config.Config, eng *policy.Engine) error {
 				src = p
 			}
 		}
+		// 走带缓存的载入：规则集载入后只读，热重载时若文件未变即复用
+		// 已解析对象。否则每次重建引擎都要重新解析 20 余万条规则（实测
+		// 每套约 11.8MB），新旧引擎并存时内存翻倍，会撞破 cgroup 上限
+		// 触发 OOM→重启→再 OOM 的死循环。
 		switch rs.Kind {
 		case "domain":
-			ds, err := ruleset.LoadDomainFile(src)
+			ds, err := ruleset.LoadDomainFileCached(src)
 			if err != nil {
 				log.Printf("警告: 解析域名规则集 %s 失败: %v", rs.Name, err)
 				continue
@@ -171,7 +177,7 @@ func loadRuleSets(cfg *config.Config, eng *policy.Engine) error {
 			eng.RegisterDomainSet(rs.Name, ds)
 			log.Printf("规则集 %s: %d 条域名", rs.Name, ds.Len())
 		case "ipcidr":
-			cs, err := ruleset.LoadCIDRFile(src)
+			cs, err := ruleset.LoadCIDRFileCached(src)
 			if err != nil {
 				log.Printf("警告: 解析 CIDR 规则集 %s 失败: %v", rs.Name, err)
 				continue
@@ -280,6 +286,11 @@ func (r *jsonlRecorder) Record(t *trace.Trace) {
 }
 
 func cmdRun(args []string) error {
+	// 两项都必须在载入规则集之前生效：启动阶段就是内存峰值所在。
+	// 先关 THP，再设 GOMEMLIMIT——前者消除内核侧放大，后者约束 Go 堆。
+	disableTHP()
+	applyCgroupMemoryLimit()
+
 	cfgPath := flagValue(args, "-c", "/etc/5gpn-next/config.json")
 	a, err := setup(cfgPath, true)
 	if err != nil {
@@ -327,6 +338,7 @@ func cmdRun(args []string) error {
 	mgr := manage.New(cfgPath, a.cfg, a.engine, a.reg)
 	// 计数器分散在 sniff（连接级）与 DoT（查询级），用闭包延迟聚合。
 	var sniffSrv *sniff.Server
+	var quicSrv *quicfwd.Server
 	snapshot := func() map[string]int64 {
 		out := map[string]int64{
 			"dns_query":  dnsStats.Query.Load(),
@@ -339,6 +351,11 @@ func cmdRun(args []string) error {
 			out["dial_fail"] = sniffSrv.Failed.Load()
 			out["no_host"] = sniffSrv.NoHost.Load()
 			out["hinted"] = sniffSrv.Hinted.Load()
+		}
+		if quicSrv != nil {
+			out["quic_handled"] = quicSrv.Handled.Load()
+			out["quic_fail"] = quicSrv.Failed.Load()
+			out["quic_no_host"] = quicSrv.NoHost.Load()
 		}
 		return out
 	}
@@ -415,14 +432,22 @@ func cmdRun(args []string) error {
 					continue
 				}
 				fctx, fcancel := context.WithTimeout(refreshCtx, 120*time.Second)
-				_, err := fetcher.Fetch(fctx, rs.Name, rs.URL)
+				_, upd, err := fetcher.FetchChanged(fctx, rs.Name, rs.URL)
 				fcancel()
 				if err != nil {
 					log.Printf("规则集 %s 后台刷新失败: %v（继续用缓存）", rs.Name, err)
 					continue
 				}
-				changed = true
+				if upd {
+					changed = true
+				}
 			}
+			// 只有内容真的变了才热重载。ReloadRuntime 会在旧引擎仍存活时
+			// 构建一份全新引擎（cn-domain 11 万条 + 广告库 10 万条），内存
+			// 瞬时翻倍。旧实现无论内容是否变化都判定“已刷新”，于是每次
+			// 启动都必定重载一次，峰值撞破 cgroup 上限被 OOM kill，重启后
+			// 再次重复，形成 OOM→重启→再 OOM 的死循环（生产实测 7 天 200
+			// 次），期间所有下载连接被反复掐断。
 			if changed {
 				if err := mgr.ReloadRuntime(); err != nil {
 					log.Printf("规则集刷新后重载失败: %v", err)
@@ -513,6 +538,63 @@ func cmdRun(args []string) error {
 				log.Printf("DoT 入口退出: %v", e)
 			}
 		}()
+
+		// QUIC 接管：Google Play 下载器（Cronet）走 HTTP/3，被 reject 后
+		// 不回落 TCP 只无限重试，表现为「下载永远等待中」。接管后解析
+		// Initial 包的 SNI 并按策略转发 UDP，让 HTTP/3 直接走通。
+		if a.cfg.DNS.QUICTakeoverEnabled() {
+			qs := &quicfwd.Server{
+				Policy:     rt.Policy,
+				Egress:     rt.Egress,
+				Recorder:   rec,
+				OnConn:     traffic.Conn,
+				HintLookup: hints.Lookup,
+				ClientCIDR: clientPfx,
+			}
+			quicSrv = qs
+			// 先放行防火墙再起监听：顺序反了会有一小段时间客户端收到
+			// 拒绝而放弃 QUIC。放行失败不致命，服务照常降级运行。
+			fwCtx, fwCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if changed, ferr := fw.EnsureQUICAccept(fwCtx, a.cfg.ClientCIDR); ferr != nil {
+				log.Printf("警告: 放行 QUIC(UDP 443) 失败，接管可能收不到流量: %v", ferr)
+			} else if changed {
+				log.Printf("防火墙已放行 QUIC(UDP 443)，来源 %s", a.cfg.ClientCIDR)
+			}
+			fwCancel()
+			// 周期性重新确认：开机时 5gpn-next-nft.service 或用户手工
+			// reload 防火墙都可能把旧的 reject 规则带回来，那会让接管
+			// 静默收不到流量。幂等检查，已放行时不做任何修改。
+			go func() {
+				t := time.NewTicker(2 * time.Minute)
+				defer t.Stop()
+				for {
+					select {
+					case <-ingressCtx.Done():
+						return
+					case <-t.C:
+						c, cancel := context.WithTimeout(ingressCtx, 10*time.Second)
+						if changed, ferr := fw.EnsureQUICAccept(c, a.cfg.ClientCIDR); ferr == nil && changed {
+							log.Printf("防火墙 QUIC 放行规则已自动补回")
+						}
+						cancel()
+					}
+				}
+			}()
+			go func() {
+				if e := qs.ListenAndServe(ingressCtx, a.cfg.DNS.TLSListen); e != nil {
+					log.Printf("QUIC 接管入口退出: %v", e)
+				}
+			}()
+		} else {
+			// 显式关闭接管：恢复 reject，避免客户端 QUIC 石沉大海。
+			fwCtx, fwCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if changed, ferr := fw.RestoreQUICReject(fwCtx, a.cfg.ClientCIDR); ferr != nil {
+				log.Printf("警告: 恢复 QUIC 拒绝规则失败: %v", ferr)
+			} else if changed {
+				log.Printf("QUIC 接管已关闭，防火墙恢复拒绝 UDP 443")
+			}
+			fwCancel()
+		}
 	}
 
 	// Telegram Bot

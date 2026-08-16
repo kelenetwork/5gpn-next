@@ -482,7 +482,11 @@ ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/5gpn-next /var/log/5gpn-next
-MemoryMax=256M
+# 内存上限必须同时容纳 Go 堆与内核侧记账。生产实测 OOM 现场：
+#   anon 132MB（Go 堆）+ slab_unreclaimable 123MB（socket 缓冲等
+#   内核对象）= 255MB，恰好卡死在旧的 256M 门槛上。
+# 内核 slab 不受 GOMEMLIMIT 约束，也无法由应用侧回收，只能预留额度。
+MemoryMax=512M
 LimitNOFILE=65535
 
 [Install]

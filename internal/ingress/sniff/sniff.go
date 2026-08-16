@@ -321,17 +321,49 @@ func parseSNI(b []byte) (string, error) {
 }
 
 // peekHTTPHost 解析明文 HTTP 的 Host 头。
+// peekHTTPHost 解析 HTTP 请求头中的 Host。
+//
+// 必须逐步窥探。bufio.Reader.Peek(n) 会阻塞到凑满 n 字节为止，而
+// 一个普通 GET 请求头往往只有一两百字节，永远凑不满 4096——旧实现
+// 一次性 Peek(4096) 会让每条 HTTP 连接都干等到读超时才继续（实测
+// 固定 8s）。Play 下载器的明文回源（dl.google.com / gvt1.com:80）
+// 与 Android 连通性探测都走这条路径，8s 停顿会让下载卡在“等待中”。
+//
+// 正确做法：只阻塞等首字节，之后按已缓冲的数据增量解析，头部收齐
+// 即返回；确实没收齐时才多等一个字节，不忙等。
 func peekHTTPHost(br *bufio.Reader) (string, error) {
-	buf, err := br.Peek(minInt(br.Size(), 4096))
-	if err != nil && len(buf) == 0 {
+	limit := minInt(br.Size(), 4096)
+	// 唯一的阻塞点：等待首字节到达。
+	if _, err := br.Peek(1); err != nil {
 		return "", err
 	}
-	text := string(buf)
-	end := strings.Index(text, "\r\n\r\n")
-	if end < 0 {
-		end = len(text)
+	for {
+		n := br.Buffered()
+		if n > limit {
+			n = limit
+		}
+		buf, err := br.Peek(n)
+		if err != nil && len(buf) == 0 {
+			return "", err
+		}
+		text := string(buf)
+		if end := strings.Index(text, "\r\n\r\n"); end >= 0 {
+			return hostFromHeaderText(text[:end])
+		}
+		if n >= limit {
+			// 头部超出窥探上限：用已有数据尽力解析。
+			return hostFromHeaderText(text)
+		}
+		// 头部尚未收齐，等下一个字节到达后重试。Peek(n+1) 只在真的
+		// 有新数据或连接结束时返回，不会忙等。
+		if _, err := br.Peek(n + 1); err != nil {
+			return hostFromHeaderText(text)
+		}
 	}
-	for _, line := range strings.Split(text[:end], "\r\n") {
+}
+
+func hostFromHeaderText(text string) (string, error) {
+	for _, line := range strings.Split(text, "\r\n") {
 		if len(line) > 5 && strings.EqualFold(line[:5], "host:") {
 			h := strings.ToLower(strings.TrimSpace(line[5:]))
 			if h != "" {
