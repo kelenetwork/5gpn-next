@@ -105,14 +105,31 @@ func (m *Manager) HasUpdate(ctx context.Context) (bool, *Release, error) {
 	return Newer(rel.Tag, m.Current), rel, nil
 }
 
-// ShouldNotify 判断是否需要推送通知（同一版本只通知一次）。
+// notifiedFile 记录最近一次已推送过的版本。
+//
+// 必须落盘：旧实现只存内存，服务一重启就忘干净，同一个版本会被反复
+// 推送。网关重启本来就不罕见（升级、改配置、异常拉起），不持久化会让
+// 用户反复收到同一条新版本提醒。
+const notifiedFile = stateDir + "/notified-version"
+
+// ShouldNotify 判断是否需要推送通知（同一版本只通知一次，跨重启有效）。
 func (m *Manager) ShouldNotify(tag string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.lastSeen == "" {
+		// 首次调用：从磁盘恢复，避免重启后重复提醒。
+		if b, err := os.ReadFile(notifiedFile); err == nil {
+			m.lastSeen = strings.TrimSpace(string(b))
+		}
+	}
 	if m.lastSeen == tag {
 		return false
 	}
 	m.lastSeen = tag
+	// 落盘失败不影响本次通知，最坏退化成旧的「重启后重复提醒一次」。
+	if err := os.MkdirAll(stateDir, 0o750); err == nil {
+		_ = os.WriteFile(notifiedFile, []byte(tag+"\n"), 0o644)
+	}
 	return true
 }
 

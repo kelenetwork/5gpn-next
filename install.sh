@@ -502,14 +502,58 @@ systemctl is-active --quiet 5gpn-next.service \
   || die "启动失败，请查看：journalctl -u 5gpn-next -n 40 --no-pager"
 ok "5gpn-next 已启动"
 
-# 证书续期后自动重载
-install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy 2>/dev/null || true
+# 证书续期钩子。
+#
+# certbot 用 standalone 验证，需要独占 80 端口，而 5gpnd 的 HTTP 接管入口
+# 正监听 :80。若不让出端口，续期必然失败：
+#   Could not bind TCP port 80 because it is already in use
+# 证书到期后 DoT(853) 与面板会一起不可用，因此这两个钩子是必需的。
+install -d -m 755 /etc/letsencrypt/renewal-hooks/pre \
+                  /etc/letsencrypt/renewal-hooks/post \
+                  /etc/letsencrypt/renewal-hooks/deploy 2>/dev/null || true
+
+cat > /etc/letsencrypt/renewal-hooks/pre/5gpn-next.sh <<'EOF'
+#!/bin/bash
+# 续期前停服让出 :80。仅在服务确实在运行时记录状态，避免把本就停止的
+# 服务在续期后被误启动。
+set -u
+STATE=/run/5gpn-next-cert-renew.state
+if systemctl is-active --quiet 5gpn-next.service; then
+  echo stopped-by-certbot > "$STATE"
+  systemctl stop 5gpn-next.service
+else
+  rm -f "$STATE"
+fi
+exit 0
+EOF
+
+cat > /etc/letsencrypt/renewal-hooks/post/5gpn-next.sh <<'EOF'
+#!/bin/bash
+# 无论续期成功与否都必须恢复服务：certbot 在失败路径同样执行 post 钩子，
+# 漏掉会让网关一直停着。
+set -u
+STATE=/run/5gpn-next-cert-renew.state
+if [ -f "$STATE" ]; then
+  rm -f "$STATE"
+  systemctl start 5gpn-next.service || true
+fi
+# 兜底：状态文件异常丢失但服务已停时仍尝试拉起。
+if ! systemctl is-active --quiet 5gpn-next.service; then
+  systemctl start 5gpn-next.service || true
+fi
+exit 0
+EOF
+
+# 新证书落地后重启以加载（post 钩子已负责启动，这里只处理未停服的情形）。
 cat > /etc/letsencrypt/renewal-hooks/deploy/5gpn-next.sh <<'EOF'
 #!/bin/bash
 systemctl is-active --quiet 5gpn-next.service && systemctl restart 5gpn-next.service
 exit 0
 EOF
-chmod 755 /etc/letsencrypt/renewal-hooks/deploy/5gpn-next.sh 2>/dev/null || true
+
+chmod 755 /etc/letsencrypt/renewal-hooks/pre/5gpn-next.sh \
+          /etc/letsencrypt/renewal-hooks/post/5gpn-next.sh \
+          /etc/letsencrypt/renewal-hooks/deploy/5gpn-next.sh 2>/dev/null || true
 
 # ---------------------------------------------------------------- 8. 自检
 step "安装自检"

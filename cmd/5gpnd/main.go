@@ -634,10 +634,17 @@ func cmdRun(args []string) error {
 			go func() {
 				t := time.NewTicker(iv)
 				defer t.Stop()
+				// 启动后先查一次再进入周期循环。否则新装或刚重启的机器要空等
+				//满一个周期（默认 12 小时）才可能收到提醒，期间用户完全不知道
+				// 已有新版本。延迟 20 秒是为了让 Bot 与网络就绪，避免开机瞬间
+				// 查询失败白白浪费这一次。
+				first := time.NewTimer(20 * time.Second)
+				defer first.Stop()
 				for {
 					select {
 					case <-botCtx.Done():
 						return
+					case <-first.C:
 					case <-t.C:
 					}
 					cctx, cancel := context.WithTimeout(botCtx, 60*time.Second)
