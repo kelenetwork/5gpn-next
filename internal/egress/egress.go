@@ -61,6 +61,11 @@ func (d *Direct) Name() string  { return d.name }
 func (d *Direct) HasIPv6() bool { return d.hasV6 }
 
 func (d *Direct) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	// 自连接防护必须在拨号前：连回本机接管端口会形成无限环路，
+	// 瞬间打满 TIME_WAIT 并把内核 slab 撑爆导致 OOM。
+	if IsSelfTakeover(addr) {
+		return nil, ErrSelfConnect
+	}
 	if err := guardIPv6(addr, d.hasV6); err != nil {
 		return nil, err
 	}

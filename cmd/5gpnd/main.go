@@ -486,6 +486,11 @@ func cmdRun(args []string) error {
 		if perr != nil {
 			return fmt.Errorf("dns.gateway_ip 无效: %w", perr)
 		}
+		// 登记自身 IP，开启出站拨号的自连接防护。DoT 把域名改写到
+		// 网关 IP，若出站时又解析回同一地址，会连回自己的接管端口形成
+		// 无限环路：生产实测 TIME_WAIT 被瞬间打满至 tcp_max_tw_buckets
+		// 上限，cgroup 内存由 51MB 暴涨到 511MB 触发 OOM kill。
+		egress.SetGatewayIP(gwIP)
 		clientPfx, perr := netip.ParsePrefix(a.cfg.ClientCIDR)
 		if perr != nil {
 			return fmt.Errorf("client_cidr 无效: %w", perr)

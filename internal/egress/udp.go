@@ -45,6 +45,10 @@ func SupportsUDP(d Dialer) bool {
 
 // DialUDP 直接从本机发出 UDP。
 func (d *Direct) DialUDP(ctx context.Context, addr string) (net.Conn, error) {
+	// 与 TCP 同理：QUIC 接管监听 UDP 443，连回自身会形成环路。
+	if IsSelfTakeover(addr) {
+		return nil, ErrSelfConnect
+	}
 	if err := guardIPv6(addr, d.hasV6); err != nil {
 		return nil, err
 	}
