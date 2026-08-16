@@ -384,7 +384,7 @@ cat > "$CFGDIR/config.json" <<EOF
   },
   "update": {
     "check_enabled": true,
-    "interval_hours": 12,
+    "interval_hours": 1,
     "auto_apply": false
   },
   "client_cidr": "${CLIENT_CIDR}",

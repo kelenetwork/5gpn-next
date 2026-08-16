@@ -627,9 +627,11 @@ func cmdRun(args []string) error {
 		// 周期检查新版本并推送。默认只通知不安装，
 		// 避免在用户不知情时替换正在运行的二进制。
 		if a.cfg.Update.CheckEnabled {
+			// 兜底值必须与配置默认值同源，否则 interval_hours=0 的配置会
+			// 悄悄退回旧的 12 小时，与新默认脱节。
 			iv := time.Duration(a.cfg.Update.IntervalHours) * time.Hour
 			if iv <= 0 {
-				iv = 12 * time.Hour
+				iv = config.DefaultUpdateIntervalHours * time.Hour
 			}
 			go func() {
 				t := time.NewTicker(iv)

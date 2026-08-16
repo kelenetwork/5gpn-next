@@ -96,11 +96,25 @@ func (d DNSConfig) QUICTakeoverEnabled() bool {
 	return d.QUICTakeover == nil || *d.QUICTakeover
 }
 
+// DefaultUpdateIntervalHours 是默认的新版本检查间隔。
+//
+// 曾用 12 小时，实践下来太钝：一次发布最坏要等 12 小时才会提醒，而且
+// 检查点绑在进程启动时刻，重启一次就漂移一次——连发几个版本时，全部
+// 掉进两次检查的间隙，用户一条提醒都收不到。
+//
+// 1 小时对应每天 24 次 GitHub API 调用，远低于未认证 60 次/小时的限额，
+// 开销可忽略。
+const DefaultUpdateIntervalHours = 1
+
+// LegacyUpdateIntervalHours 是旧版本的默认检查间隔。
+// 仅用于识别「用户从未改过」的老配置，见 Load 中的迁移逻辑。
+const LegacyUpdateIntervalHours = 12
+
 // UpdateConfig 是更新检查配置。
 type UpdateConfig struct {
 	// CheckEnabled 开启后周期检查新版本并通过 Bot 推送
 	CheckEnabled bool `json:"check_enabled"`
-	// IntervalHours 检查间隔，0 表示使用默认 12 小时
+	// IntervalHours 检查间隔，0 表示使用默认值（DefaultUpdateIntervalHours）
 	IntervalHours int `json:"interval_hours"`
 	// AutoApply 为 true 时自动安装（默认关闭，仅推送通知）
 	AutoApply bool `json:"auto_apply"`
@@ -254,7 +268,7 @@ func Default() *Config {
 			TLSListen:  ":443",
 			Upstream:   []string{"223.5.5.5:53", "119.29.29.29:53"},
 		},
-		Update:  UpdateConfig{CheckEnabled: true, IntervalHours: 12},
+		Update:  UpdateConfig{CheckEnabled: true, IntervalHours: DefaultUpdateIntervalHours},
 		LogPath: "/var/log/5gpn-next/trace.jsonl",
 		RuleSets: []RuleSetConfig{
 			{Name: "cn-domain", Kind: "domain", IntervalHours: 24,
@@ -409,6 +423,14 @@ func Load(path string) (*Config, error) {
 	// 语义上等于本机直出，归一为 "direct"，让 DIRECT 正确显示为当前出口。
 	if c.Final == "proxy" || c.Final == "" {
 		c.Final = "direct"
+	}
+	// 迁移：把旧默认的 12 小时检查间隔提到新默认。
+	//
+	// 老配置文件里硬写着 interval_hours: 12，只改代码默认值对已装机器
+	// 无效——它们会一直沿用 12 小时。这里只认「恰好等于旧默认值」这一种
+	// 情况，视为用户从未调整过；任何其它取值都是显式选择，原样保留。
+	if c.Update.IntervalHours == LegacyUpdateIntervalHours {
+		c.Update.IntervalHours = DefaultUpdateIntervalHours
 	}
 	return c, c.Validate()
 }
