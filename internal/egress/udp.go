@@ -63,9 +63,9 @@ func (d *Direct) DialUDP(ctx context.Context, addr string) (net.Conn, error) {
 	if err := guardIPv6(addr, d.hasV6); err != nil {
 		return nil, err
 	}
-	var lc net.Dialer
-	lc.Timeout = DialTimeout
-	c, err := lc.DialContext(ctx, "udp", addr)
+	// 复用 Direct 的 dialer：其 ControlContext 会在 DNS 解析完成后检查
+	// 实际目标 IP，防止域名/CNAME 解析回网关 UDP 443 形成 QUIC 环路。
+	c, err := d.dialer.DialContext(ctx, "udp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +92,10 @@ func limitUDPBuffers(c net.Conn) {
 // 地址后本地起 UDP socket 与之通信；控制连接必须在整个会话期间
 // 保持打开，一旦断开中继即失效。
 func (s *Socks5) DialUDP(ctx context.Context, addr string) (net.Conn, error) {
+	// SOCKS5 UDP 的目标域名由上游解析，必须在封装请求前先挡住网关自身。
+	if IsSelfTakeover(addr) {
+		return nil, ErrSelfConnect
+	}
 	if err := guardIPv6(addr, s.hasV6); err != nil {
 		return nil, err
 	}

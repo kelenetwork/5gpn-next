@@ -491,6 +491,9 @@ func cmdRun(args []string) error {
 		// 无限环路：生产实测 TIME_WAIT 被瞬间打满至 tcp_max_tw_buckets
 		// 上限，cgroup 内存由 51MB 暴涨到 511MB 触发 OOM kill。
 		egress.SetGatewayIP(gwIP)
+		// 同时登记域名：SOCKS5 由远端解析目标，DIRECT 的 ControlContext
+		// 看不到它的最终 IP；精确拦截网关域名可防跨出口递归回本机。
+		egress.SetGatewayHost(a.cfg.Gateway.Host)
 		clientPfx, perr := netip.ParsePrefix(a.cfg.ClientCIDR)
 		if perr != nil {
 			return fmt.Errorf("client_cidr 无效: %w", perr)

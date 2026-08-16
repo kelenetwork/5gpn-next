@@ -51,9 +51,13 @@ func NewDirect(name string) *Direct {
 		name = "DIRECT"
 	}
 	return &Direct{
-		name:   name,
-		hasV6:  probeLocalIPv6(),
-		dialer: &net.Dialer{Timeout: DialTimeout, KeepAlive: 30 * time.Second},
+		name:  name,
+		hasV6: probeLocalIPv6(),
+		dialer: &net.Dialer{
+			Timeout:        DialTimeout,
+			KeepAlive:      30 * time.Second,
+			ControlContext: guardResolvedSelfTakeover,
+		},
 	}
 }
 
@@ -151,6 +155,11 @@ func (s *Socks5) Name() string  { return s.name }
 func (s *Socks5) HasIPv6() bool { return s.hasV6 }
 
 func (s *Socks5) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	// SOCKS5 由远端解析域名，DIRECT 的 ControlContext 看不到最终目标；
+	// 因而必须在交给上游前拦截网关自身域名/IP，避免跨节点递归回本机。
+	if IsSelfTakeover(addr) {
+		return nil, ErrSelfConnect
+	}
 	// 节点无 v6 能力时对 IPv6 字面量快速失败，促使客户端 Happy Eyeballs
 	// 立即回落 IPv4；有 v6 能力则由节点代拨（SOCKS ATYP=4）。
 	if err := guardIPv6(addr, s.hasV6); err != nil {
