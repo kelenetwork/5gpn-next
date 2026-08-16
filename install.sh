@@ -52,9 +52,39 @@ MEM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
 [ "$MEM_MB" -ge 400 ] || warn "内存仅 ${MEM_MB}MB，建议 512MB 以上"
 ok "内存 ${MEM_MB}MB"
 
-for c in curl systemctl nft; do
-  command -v "$c" >/dev/null 2>&1 || die "缺少命令：$c（Debian/Ubuntu 请先 apt install -y curl nftables）"
-done
+# 缺依赖时自动安装。裸系统（尤其容器/云镜像）常常没有 nftables，
+# 让用户先手执行一遍 apt 再回来跑安装器是多余的——脚本已经是 root，
+# 且后面签证书时本来就会自动装 certbot，前后行为应当一致。
+MISSING_PKGS=""
+need_pkg() {  # need_pkg <命令> <包名>
+  command -v "$1" >/dev/null 2>&1 && return 0
+  case " $MISSING_PKGS " in
+    *" $2 "*) ;;
+    *) MISSING_PKGS="${MISSING_PKGS:+$MISSING_PKGS }$2" ;;
+  esac
+}
+
+need_pkg curl curl
+need_pkg nft nftables
+
+if [ -n "$MISSING_PKGS" ]; then
+  command -v apt-get >/dev/null 2>&1 \
+    || die "缺少依赖：$MISSING_PKGS，且本系统无 apt-get，请手动安装后重试"
+  dim "安装缺少依赖：$MISSING_PKGS"
+  apt-get update -qq >/dev/null 2>&1 || true
+  # shellcheck disable=SC2086
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $MISSING_PKGS >/dev/null 2>&1 || true
+  for c in curl nft; do
+    command -v "$c" >/dev/null 2>&1 \
+      || die "依赖 $c 自动安装失败，请手动执行：apt install -y $MISSING_PKGS"
+  done
+  ok "已自动安装：$MISSING_PKGS"
+fi
+
+# systemctl 属于 init 系统，装不了，只能明确报错。
+command -v systemctl >/dev/null 2>&1 \
+  || die "未找到 systemctl：本安装器仅支持 systemd 系统（容器环境请改用宿主机或支持 systemd 的镜像）"
+
 ok "依赖齐全"
 
 # ---------------------------------------------------------------- 1. 收集参数
@@ -370,12 +400,13 @@ step "配置防火墙"
 
 DNS_NFT=""
 if [ "$DNS_ON" = "true" ]; then
-  # QUIC 无明文 SNI，无法嗅探接管；reject 让客户端尽快回落 TCP，
-  # 直接 drop 会让应用静默等待超时。
+  # QUIC（UDP 443）由网关接管：解析 Initial 包的 SNI 后按策略转发。
+  # 旧版在此 reject 指望客户端回落 TCP，但 Google Play 下载器不回落，
+  # 只会无限重试，表现为「下载永远等待中」，因此必须放行。
   DNS_NFT=$(cat <<NFTEOF
     ip saddr ${CLIENT_CIDR} tcp dport { 53, 80, 443, 853 } accept comment "5gpn-dns"
     ip saddr ${CLIENT_CIDR} udp dport 53 accept comment "5gpn-dns"
-    ip saddr ${CLIENT_CIDR} udp dport 443 reject with icmp port-unreachable comment "5gpn-dns-quic"
+    ip saddr ${CLIENT_CIDR} udp dport 443 accept comment "5gpn-quic-takeover"
 NFTEOF
 )
   DNS_NFT="${DNS_NFT}
