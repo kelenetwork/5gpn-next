@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +35,19 @@ type Recorder interface{ Record(t *trace.Trace) }
 
 // ConnStat 供流量统计使用。
 type ConnStat func(host, action string, up, down int64, failed bool)
+
+// maxConns 限制同时在转发的 TCP 连接数。
+//
+// 每条连接会占用两个 goroutine、两条 io.Copy 的 32KB 缓冲，以及内核为
+// socket 预留的收发缓冲（按 net.core.{r,w}mem_default，典型各 208KB）。
+// 内核那部分计入 cgroup 的 slab_unreclaimable，不受 GOMEMLIMIT 约束，
+// 也无法由应用侧回收——生产 OOM 正是被这类内核记账顶破的。
+//
+// 旧实现对 Accept 不设任何上限：连接来多少就开多少，内存无上界。
+// 1024 条并发对单网关场景足够，对应内核缓冲上界约 416MB 的理论值，
+// 实际远低于此（多数连接不会同时用满缓冲）。超限时直接关闭新连接，
+// 客户端会自行重试，好过把整个网关拖进 OOM。
+const maxConns = 1024
 
 // Server 是 SNI/Host 嗅探接管服务。
 type Server struct {
@@ -53,8 +67,30 @@ type Server struct {
 	Failed  atomic.Int64
 	NoHost  atomic.Int64
 	Hinted  atomic.Int64
+	Refused atomic.Int64 // 因超过并发上限而被拒的连接数
 
 	seq atomic.Uint64
+
+	semOnce sync.Once
+	sem     chan struct{}
+}
+
+// acquire 获取一个并发名额；返回 false 表示已达上限。
+func (s *Server) acquire() bool {
+	s.semOnce.Do(func() { s.sem = make(chan struct{}, maxConns) })
+	select {
+	case s.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) release() {
+	select {
+	case <-s.sem:
+	default:
+	}
 }
 
 // ListenAndServe 在指定端口接管流量。tls 为 true 时按 TLS ClientHello 解析。
@@ -83,7 +119,17 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, isTLS bool) er
 			}
 			continue
 		}
-		go s.handle(ctx, c, isTLS)
+		// 并发闸门必须在开 goroutine 之前：否则限流本身也会先分配一个
+		// goroutine 栈，失去保护意义。
+		if !s.acquire() {
+			s.Refused.Add(1)
+			_ = c.Close()
+			continue
+		}
+		go func() {
+			defer s.release()
+			s.handle(ctx, c, isTLS)
+		}()
 	}
 }
 

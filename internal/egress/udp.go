@@ -43,6 +43,17 @@ func SupportsUDP(d Dialer) bool {
 
 // ---------- 本机直出 ----------
 
+// udpSocketBuffer 是每条转发 UDP 会话的内核收发缓冲上限。
+//
+// 不显式设置时，内核按 net.core.{r,w}mem_default 预留，典型各 208KB。
+// 这部分内存计入 cgroup 的 slab_unreclaimable，既不受 GOMEMLIMIT 约束，
+// 也无法由应用侧回收——生产 OOM 现场即为 anon 222MB + slab 260MB 顶破
+// 512MB 上限，而健康态 slab 仅 0.23MB。
+//
+// QUIC 单个数据报不超过约 1500 字节，64KB 可缓冲约 40 个数据报，对
+// 转发场景足够；相比默认值可把每会话内核开销降到约三分之一。
+const udpSocketBuffer = 64 << 10
+
 // DialUDP 直接从本机发出 UDP。
 func (d *Direct) DialUDP(ctx context.Context, addr string) (net.Conn, error) {
 	// 与 TCP 同理：QUIC 接管监听 UDP 443，连回自身会形成环路。
@@ -58,7 +69,19 @@ func (d *Direct) DialUDP(ctx context.Context, addr string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	limitUDPBuffers(c)
 	return c, nil
+}
+
+// limitUDPBuffers 收紧 UDP socket 的内核收发缓冲。
+// 设置失败不影响功能，仅退化为内核默认值。
+func limitUDPBuffers(c net.Conn) {
+	uc, ok := c.(*net.UDPConn)
+	if !ok {
+		return
+	}
+	_ = uc.SetReadBuffer(udpSocketBuffer)
+	_ = uc.SetWriteBuffer(udpSocketBuffer)
 }
 
 // ---------- SOCKS5 UDP ASSOCIATE（对接 mihomo） ----------

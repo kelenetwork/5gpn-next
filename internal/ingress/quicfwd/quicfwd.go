@@ -37,11 +37,26 @@ const (
 	// 空闲这么久基本可判定已结束。
 	idleTimeout = 90 * time.Second
 	// maxSessions 限制并发会话数，防止伪造源地址耗尽内存。
-	maxSessions = 4096
+	//
+	// 上限不能只看 Go 侧开销。每个被接管的 QUIC 会话都要向出口建立一个
+	// UDP socket，内核按 net.core.{r,w}mem_default 为其预留收发缓冲
+	// （典型 208KB + 208KB）。这部分计入 cgroup 的 slab_unreclaimable，
+	// 既不受 GOMEMLIMIT 约束，也无法由应用侧回收。
+	//
+	// 按旧值 4096 计算，仅内核缓冲上界就达 1664MB，而目标机总内存只有
+	// 941MB、cgroup 上限 512MB。生产 OOM 现场印证了这一点：
+	//   anon 222MB + slab_unreclaimable 260MB ≈ 512MB（正好顶破）
+	// 健康态 slab_unreclaimable 仅 0.23MB，相差三个数量级。
+	//
+	// 512 个并发 QUIC 会话对单网关的家庭/小团队场景绰绰有余，对应内核
+	// 缓冲上界约 208MB、Go 侧 pending 上界 16MB，留足安全边界。
+	maxSessions = 512
 	// maxPendingDatagrams / maxPendingBytes 限制 SNI 尚未确定时
 	// 每个会话可缓冲的数据量。
 	maxPendingDatagrams = 16
-	maxPendingBytes     = 64 << 10
+	// 字节上限必须小于「个数 × 单报上限」，否则永远不会触发，等于没有。
+	// 旧值 64KB 大于 16×2048=32KB，字节这道防线形同虚设。
+	maxPendingBytes = 32 << 10
 )
 
 // Recorder 接收连接决策记录。
