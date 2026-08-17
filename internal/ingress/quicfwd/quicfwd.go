@@ -62,8 +62,9 @@ const (
 // Recorder 接收连接决策记录。
 type Recorder interface{ Record(t *trace.Trace) }
 
-// ConnStat 供流量统计使用，签名与 sniff 包一致。
-type ConnStat func(host, action string, up, down int64, failed bool)
+// ConnStat / TrafficStat 供实时流量统计使用，签名与 sniff 包一致。
+type ConnStat func(host, action string, failed bool)
+type TrafficStat func(host string, up, down int64)
 
 // Server 是 QUIC 接管服务。
 type Server struct {
@@ -71,8 +72,9 @@ type Server struct {
 	Policy func() *policy.Engine
 	Egress func() *egress.Registry
 
-	Recorder Recorder
-	OnConn   ConnStat
+	Recorder  Recorder
+	OnConn    ConnStat
+	OnTraffic TrafficStat
 
 	// HintLookup 返回该客户端最近经 DoT 被改写到网关的域名（可为空）。
 	// 仅在 QUIC 首包无 SNI 时兜底，绝不覆盖已解析出的 SNI。
@@ -107,7 +109,9 @@ type session struct {
 	pendingBytes int
 	resolving    bool
 	closed       bool
+	counted      bool
 	host         string
+	action       string
 
 	lastSeen atomic.Int64 // UnixNano
 	up       atomic.Int64
@@ -229,9 +233,12 @@ func (sc *session) onDatagram(ctx context.Context, pc net.PacketConn, dg []byte)
 	// 中继已建立：直接转发。
 	if sc.remote != nil {
 		remote := sc.remote
+		host := sc.host
 		sc.mu.Unlock()
-		if _, err := remote.Write(dg); err == nil {
-			sc.up.Add(int64(len(dg)))
+		n, _ := remote.Write(dg)
+		if n > 0 {
+			sc.up.Add(int64(n))
+			sc.reportTraffic(host, int64(n), 0)
 		}
 		return
 	}
@@ -298,6 +305,7 @@ func (sc *session) connect(ctx context.Context, pc net.PacketConn, host string) 
 
 	t, _ := policy.ParseTarget(target)
 	dec := sc.srv.Policy().MatchContext(ctx, t)
+	actionName := statsAction(dec.Action)
 
 	switch dec.Action {
 	case policy.ActionBlock:
@@ -313,18 +321,18 @@ func (sc *session) connect(ctx context.Context, pc net.PacketConn, host string) 
 	}
 
 	reg := sc.srv.Egress()
-	d, ok := reg.Get(dec.Egress)
+	d, ok := selectDialer(reg, dec)
 	if !ok || d == nil {
 		sc.tr.Fail(trace.StageEgress, nil, "出口 %q 不存在", dec.Egress)
 		sc.srv.Failed.Add(1)
-		sc.finish(host, "fail", true)
+		sc.finish(host, actionName, true)
 		return
 	}
 	if !egress.SupportsUDP(d) {
 		// 出口无法承载 UDP：放弃接管，让客户端自行回落 TCP。
 		sc.tr.Fail(trace.StageEgress, egress.ErrNoUDP, "%s 不支持 UDP，放弃接管 QUIC", d.Name())
 		sc.srv.Failed.Add(1)
-		sc.finish(host, "fail", true)
+		sc.finish(host, actionName, true)
 		return
 	}
 	sc.tr.Step(trace.StageEgress, trace.StatusOK, "%s", d.Name())
@@ -335,7 +343,7 @@ func (sc *session) connect(ctx context.Context, pc net.PacketConn, host string) 
 	if err != nil {
 		sc.tr.Fail(trace.StageConnect, err, "QUIC 出口拨号 %s 失败", target)
 		sc.srv.Failed.Add(1)
-		sc.finish(host, "fail", true)
+		sc.finish(host, actionName, true)
 		return
 	}
 	sc.tr.Step(trace.StageConnect, trace.StatusOK, "UDP 会话 %s 已建立", remote.RemoteAddr())
@@ -347,34 +355,48 @@ func (sc *session) connect(ctx context.Context, pc net.PacketConn, host string) 
 		return
 	}
 	sc.remote = remote
+	sc.action = actionName
+	reportConn := !sc.counted
+	sc.counted = true
 	pending := sc.pending
 	sc.pending = nil
 	sc.pendingBytes = 0
 	sc.mu.Unlock()
 
+	if reportConn && sc.srv.OnConn != nil {
+		sc.srv.OnConn(host, actionName, false)
+	}
 	sc.srv.Handled.Add(1)
 
 	// 补发握手期间缓冲的数据报，顺序与到达顺序一致。
 	for _, dg := range pending {
-		if _, err := remote.Write(dg); err != nil {
+		n, err := remote.Write(dg)
+		if n > 0 {
+			sc.up.Add(int64(n))
+			sc.reportTraffic(host, int64(n), 0)
+		}
+		if err != nil {
 			break
 		}
-		sc.up.Add(int64(len(dg)))
 	}
 
-	go sc.pump(pc, remote, host)
+	go sc.pump(pc, remote, host, actionName)
 }
 
 // pump 把出口返回的数据报回送给客户端。
-func (sc *session) pump(pc net.PacketConn, remote net.Conn, host string) {
+func (sc *session) pump(pc net.PacketConn, remote net.Conn, host, action string) {
 	buf := make([]byte, maxDatagram)
 	for {
 		_ = remote.SetReadDeadline(time.Now().Add(idleTimeout))
 		n, err := remote.Read(buf)
 		if n > 0 {
 			sc.lastSeen.Store(time.Now().UnixNano())
-			sc.down.Add(int64(n))
-			if _, werr := pc.WriteTo(buf[:n], sc.client); werr != nil {
+			written, werr := pc.WriteTo(buf[:n], sc.client)
+			if written > 0 {
+				sc.down.Add(int64(written))
+				sc.reportTraffic(host, 0, int64(written))
+			}
+			if werr != nil {
 				break
 			}
 		}
@@ -384,7 +406,7 @@ func (sc *session) pump(pc net.PacketConn, remote net.Conn, host string) {
 	}
 	sc.tr.Step(trace.StageApp, trace.StatusOK, "QUIC 会话结束 up=%dB down=%dB",
 		sc.up.Load(), sc.down.Load())
-	sc.finish(host, "quic", false)
+	sc.finish(host, action, false)
 }
 
 // abort 记录无法接管的会话并清理。
@@ -402,6 +424,16 @@ func (sc *session) finish(host, action string, failed bool) {
 		return
 	}
 	sc.closed = true
+	if host == "" {
+		host = sc.host
+	}
+	if action == "" {
+		action = sc.action
+	}
+	reportConn := !sc.counted && host != "" && action != ""
+	if reportConn {
+		sc.counted = true
+	}
 	remote := sc.remote
 	sc.remote = nil
 	sc.pending = nil
@@ -417,9 +449,33 @@ func (sc *session) finish(host, action string, failed bool) {
 	if sc.srv.Recorder != nil {
 		sc.srv.Recorder.Record(sc.tr)
 	}
-	if sc.srv.OnConn != nil && host != "" {
-		sc.srv.OnConn(host, action, sc.up.Load(), sc.down.Load(), failed)
+	if reportConn && sc.srv.OnConn != nil {
+		sc.srv.OnConn(host, action, failed)
 	}
+}
+
+func (sc *session) reportTraffic(host string, up, down int64) {
+	if sc.srv.OnTraffic != nil && (up > 0 || down > 0) {
+		sc.srv.OnTraffic(host, up, down)
+	}
+}
+
+func statsAction(action policy.Action) string {
+	switch action {
+	case policy.ActionBlock:
+		return "block"
+	case policy.ActionDirect:
+		return "direct"
+	default:
+		return "proxy"
+	}
+}
+
+func selectDialer(reg *egress.Registry, dec policy.Decision) (egress.Dialer, bool) {
+	if dec.Action == policy.ActionDirect {
+		return reg.Direct(), true
+	}
+	return reg.Get(dec.Egress)
 }
 
 // janitor 周期清理空闲会话。
@@ -442,7 +498,7 @@ func (s *Server) janitor(ctx context.Context) {
 			}
 			s.mu.Unlock()
 			for _, sc := range stale {
-				sc.finish(sc.host, "quic", false)
+				sc.finish("", "", false)
 			}
 		}
 	}
@@ -456,7 +512,7 @@ func (s *Server) closeAll() {
 	}
 	s.mu.Unlock()
 	for _, sc := range all {
-		sc.finish(sc.host, "quic", false)
+		sc.finish("", "", false)
 	}
 }
 

@@ -600,16 +600,29 @@ func (b *Bot) showTraffic(ctx context.Context, v view) {
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	row := func(icon, name string, d stats.Day) {
 		fmt.Fprintf(&sb, "%s <b>%s</b>　<b>%s</b>\n", icon, name, stats.HumanBytes(d.Total()))
-		fmt.Fprintf(&sb, "<blockquote>↑ %s　↓ %s\n%d 连接 · 直连 %d / 代理 %d</blockquote>\n",
+		fmt.Fprintf(&sb, "<blockquote>↑ %s　↓ %s\n%d 连接 · 直连 %d / 代理 %d",
 			stats.HumanBytes(d.Up), stats.HumanBytes(d.Down),
 			d.Conns, d.DirectConns, d.ProxyConns)
+		if d.Blocked > 0 {
+			fmt.Fprintf(&sb, " / 拦截 %d", d.Blocked)
+		}
+		// v0.13.9 及更早版本把 QUIC/失败写成未识别 action；历史聚合
+		// 无法可靠反推直连或代理，只透明展示差额，不伪造分类。
+		unclassified := d.Conns - d.DirectConns - d.ProxyConns - d.Blocked
+		if unclassified > 0 {
+			fmt.Fprintf(&sb, " / 旧版未分类 %d", unclassified)
+		}
+		if d.Failed > 0 {
+			fmt.Fprintf(&sb, "\n其中失败 %d", d.Failed)
+		}
+		sb.WriteString("</blockquote>\n")
 	}
 	row("📅", "今日", sum.Today)
 	row("🗓", "近 7 天", sum.Days7)
 	row("📆", "近 30 天", sum.Days30)
 
 	if len(sum.TopDomain) > 0 {
-		sb.WriteString("\n🔝 <b>流量最高的站点</b>\n<blockquote expandable>")
+		sb.WriteString("\n🔝 <b>累计流量最高的站点</b>\n<blockquote expandable>")
 		for i, t := range sum.TopDomain {
 			if i >= 8 {
 				break
@@ -622,7 +635,7 @@ func (b *Bot) showTraffic(ctx context.Context, v view) {
 		}
 		sb.WriteString("</blockquote>")
 	}
-	fmt.Fprintf(&sb, "\n<i>统计自 %s 起，仅保留聚合数据，不记录访问明细。</i>",
+	fmt.Fprintf(&sb, "\n<i>按北京时间自然日统计；仅包含实际经过网关转发的流量，手机本地直连流量不在其中。统计自 %s 起，仅保留聚合数据。</i>",
 		html.EscapeString(sum.Since))
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(

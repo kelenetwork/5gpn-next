@@ -364,8 +364,16 @@ func cmdRun(args []string) error {
 	traffic := stats.New("/var/lib/5gpn-next/traffic.json")
 	mgr.Traffic = traffic
 	trafficDone := make(chan struct{})
-	defer close(trafficDone)
-	go traffic.RunFlusher(trafficDone, 60*time.Second)
+	trafficStopped := make(chan struct{})
+	go func() {
+		defer close(trafficStopped)
+		traffic.RunFlusher(trafficDone, 10*time.Second)
+	}()
+	// 等最终一次原子落盘完成再退出，避免正常升级/重启损失最后一个周期。
+	defer func() {
+		close(trafficDone)
+		<-trafficStopped
+	}()
 
 	// 版本管理
 	updater := update.New(version)
@@ -508,6 +516,7 @@ func cmdRun(args []string) error {
 			Egress:     rt.Egress,
 			Recorder:   rec,
 			OnConn:     traffic.Conn,
+			OnTraffic:  traffic.Traffic,
 			HintLookup: hints.Lookup,
 		}
 		sniffSrv = sn
@@ -556,6 +565,7 @@ func cmdRun(args []string) error {
 				Egress:     rt.Egress,
 				Recorder:   rec,
 				OnConn:     traffic.Conn,
+				OnTraffic:  traffic.Traffic,
 				HintLookup: hints.Lookup,
 				ClientCIDR: clientPfx,
 			}

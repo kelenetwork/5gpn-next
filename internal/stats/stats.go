@@ -7,6 +7,7 @@ package stats
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,6 +60,7 @@ type Store struct {
 	mu   sync.Mutex
 	path string
 	data persisted
+	now  func() time.Time
 
 	dirty            bool
 	maxDays          int
@@ -71,6 +73,7 @@ type Store struct {
 func New(path string) *Store {
 	s := &Store{
 		path:             path,
+		now:              time.Now,
 		maxDays:          90,
 		maxDomain:        400,
 		maxBlockedDomain: 400,
@@ -78,7 +81,7 @@ func New(path string) *Store {
 		data: persisted{
 			Days:           make(map[string]*Day),
 			Domains:        make(map[string]int64),
-			Since:          time.Now().Format("2006-01-02"),
+			Since:          dayKey(time.Now()),
 			BlockedDomains: make(map[string]*blockAggregate),
 		},
 	}
@@ -105,7 +108,7 @@ func (s *Store) load() {
 		p.BlockedDomains = make(map[string]*blockAggregate)
 	}
 	if p.Since == "" {
-		p.Since = time.Now().Format("2006-01-02")
+		p.Since = dayKey(s.now())
 	}
 	s.data = p
 }
@@ -202,7 +205,7 @@ func (s *Store) prune() {
 }
 
 func (s *Store) today() *Day {
-	key := time.Now().Format("2006-01-02")
+	key := dayKey(s.now())
 	d, ok := s.data.Days[key]
 	if !ok {
 		d = &Day{Date: key}
@@ -211,16 +214,14 @@ func (s *Store) today() *Day {
 	return d
 }
 
-// Conn 记录一次连接的结果与流量。
-//
-// host 为空或为 IP 时不计入域名榜，避免把裸 IP 塞满统计。
-func (s *Store) Conn(host, action string, up, down int64, failed bool) {
+// Conn 在策略结果已知时记录一次连接。连接数必须在建立或失败时立即
+// 入账，不能等长连接关闭；否则 HTTP/2、推送与视频连接会延迟数小时，
+// 服务重启还会让整条连接永久漏计。
+func (s *Store) Conn(_ string, action string, failed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.today()
 	d.Conns++
-	d.Up += up
-	d.Down += down
 	switch action {
 	case "direct":
 		d.DirectConns++
@@ -232,10 +233,51 @@ func (s *Store) Conn(host, action string, up, down int64, failed bool) {
 	if failed {
 		d.Failed++
 	}
-	if host != "" && (up+down) > 0 {
+	s.dirty = true
+}
+
+// Traffic 按实际写出的字节增量实时记账。调用发生在转发循环内，因此
+// 长连接的流量无需等关闭即可显示，跨零点时也会归入流量实际发生的日期。
+// host 为空或为 IP 时不计入域名榜，避免裸 IP 塞满 Top 统计。
+func (s *Store) Traffic(host string, up, down int64) {
+	if up < 0 {
+		up = 0
+	}
+	if down < 0 {
+		down = 0
+	}
+	if up == 0 && down == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.today()
+	d.Up += up
+	d.Down += down
+	if host = domainKey(host); host != "" {
 		s.data.Domains[host] += up + down
 	}
 	s.dirty = true
+}
+
+// trafficLocation 固定使用用户侧统计口径（北京时间）。部署节点通常是
+// UTC；若依赖服务器本地时区，“今日”会在北京时间 08:00 才换日。
+var trafficLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
+
+func dayKey(t time.Time) string {
+	return t.In(trafficLocation).Format("2006-01-02")
+}
+
+func domainKey(host string) string {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" {
+		return ""
+	}
+	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		return ""
+	}
+	return host
 }
 
 // AdBlockSuccess 记录一次已成功写回客户端的广告 NXDOMAIN 响应。
@@ -246,7 +288,7 @@ func (s *Store) AdBlockSuccess(host string) {
 	if host == "" {
 		return
 	}
-	now := time.Now()
+	now := s.now().In(trafficLocation)
 	at := now.Unix()
 
 	s.mu.Lock()
@@ -255,7 +297,7 @@ func (s *Store) AdBlockSuccess(host string) {
 	d.AdBlocked++
 	s.data.AdBlockTotal++
 	if s.data.AdBlockSince == "" {
-		s.data.AdBlockSince = now.Format("2006-01-02")
+		s.data.AdBlockSince = dayKey(now)
 	}
 	agg := s.data.BlockedDomains[host]
 	if agg == nil {
@@ -314,14 +356,14 @@ func (s *Store) AdBlockSummary(recentN, topN int) AdBlockSummary {
 	defer s.mu.Unlock()
 
 	out := AdBlockSummary{Since: s.data.AdBlockSince, Total: s.data.AdBlockTotal}
-	todayKey := time.Now().Format("2006-01-02")
+	now := s.now().In(trafficLocation)
+	todayKey := dayKey(now)
 	if d := s.data.Days[todayKey]; d != nil {
 		out.Today = d.AdBlocked
 	}
 
 	// 7/30 日按自然日窗口统计，而不是“最近 7/30 个有数据的日期”。
 	// 后者在低频设备上会把几个月前的命中错误计入近期统计。
-	now := time.Now()
 	start7 := now.AddDate(0, 0, -6).Format("2006-01-02")
 	start30 := now.AddDate(0, 0, -29).Format("2006-01-02")
 	for key, d := range s.data.Days {
@@ -375,20 +417,23 @@ func (s *Store) Summary(recentDays, topN int) Summary {
 	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
 
 	out := Summary{Since: s.data.Since}
-	todayKey := time.Now().Format("2006-01-02")
+	now := s.now().In(trafficLocation)
+	todayKey := dayKey(now)
 	if d, ok := s.data.Days[todayKey]; ok {
 		out.Today = *d
 	} else {
 		out.Today = Day{Date: todayKey}
 	}
 
+	start7 := now.AddDate(0, 0, -6).Format("2006-01-02")
+	start30 := now.AddDate(0, 0, -29).Format("2006-01-02")
 	for i, k := range keys {
 		d := s.data.Days[k]
 		accumulate(&out.AllTime, d)
-		if i < 7 {
+		if k >= start7 && k <= todayKey {
 			accumulate(&out.Days7, d)
 		}
-		if i < 30 {
+		if k >= start30 && k <= todayKey {
 			accumulate(&out.Days30, d)
 		}
 		if i < recentDays {

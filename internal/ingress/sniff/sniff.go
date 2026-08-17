@@ -33,8 +33,10 @@ var ErrNoHost = errors.New("无法从首包识别目标域名")
 // Recorder 接收连接决策记录。
 type Recorder interface{ Record(t *trace.Trace) }
 
-// ConnStat 供流量统计使用。
-type ConnStat func(host, action string, up, down int64, failed bool)
+// ConnStat / TrafficStat 供实时流量统计使用。连接数与字节增量分开上报，
+// 避免长连接必须等到关闭后才能入账。
+type ConnStat func(host, action string, failed bool)
+type TrafficStat func(host string, up, down int64)
 
 // maxConns 限制同时在转发的 TCP 连接数。
 //
@@ -55,8 +57,9 @@ type Server struct {
 	Policy func() *policy.Engine
 	Egress func() *egress.Registry
 
-	Recorder Recorder
-	OnConn   ConnStat
+	Recorder  Recorder
+	OnConn    ConnStat
+	OnTraffic TrafficStat
 
 	// HintLookup 返回该客户端最近经 DoT 被改写到网关的域名（可为空）。
 	// 无 SNI 私有协议（如 WhatsApp Noise）嗅探失败时用它回退还原目的地；
@@ -186,7 +189,7 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	case policy.ActionBlock:
 		tr.Step(trace.StagePolicy, trace.StatusOK, "%s → 拦截", dec.Rule)
 		if s.OnConn != nil {
-			s.OnConn(host, "block", 0, 0, false)
+			s.OnConn(host, "block", false)
 		}
 		return
 	case policy.ActionDirect:
@@ -218,25 +221,40 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 		s.Failed.Add(1)
 		tr.Fail(trace.StageConnect, err, "拨号 %s 失败", target)
 		if s.OnConn != nil {
-			s.OnConn(host, actionName, 0, 0, true)
+			s.OnConn(host, actionName, true)
 		}
 		return
 	}
 	defer up.Close()
 	s.Handled.Add(1)
+	if s.OnConn != nil {
+		s.OnConn(host, actionName, false)
+	}
 	tr.Step(trace.StageConnect, trace.StatusOK, "TCP %s 已建立", up.RemoteAddr())
 
 	// 双向转发；br 中已读出的首包（含无法解析的私有协议字节）需要一并送出
 	var upN, downN int64
 	done := make(chan struct{}, 2)
 	go func() {
-		n, _ := io.Copy(up, br)
+		dst := io.Writer(up)
+		if s.OnTraffic != nil {
+			dst = trafficWriter{dst: up, report: func(n int64) {
+				s.OnTraffic(host, n, 0)
+			}}
+		}
+		n, _ := io.Copy(dst, br)
 		atomic.AddInt64(&upN, n)
 		closeWrite(up)
 		done <- struct{}{}
 	}()
 	go func() {
-		n, _ := io.Copy(cli, up)
+		dst := io.Writer(cli)
+		if s.OnTraffic != nil {
+			dst = trafficWriter{dst: cli, report: func(n int64) {
+				s.OnTraffic(host, 0, n)
+			}}
+		}
+		n, _ := io.Copy(dst, up)
 		atomic.AddInt64(&downN, n)
 		closeWrite(cli)
 		done <- struct{}{}
@@ -245,9 +263,21 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	<-done
 
 	tr.Step(trace.StageApp, trace.StatusOK, "连接关闭 up=%dB down=%dB", upN, downN)
-	if s.OnConn != nil {
-		s.OnConn(host, actionName, upN, downN, false)
+}
+
+// trafficWriter 只统计已经成功写给对端的字节，而不是从来源读到但写出
+// 失败的字节。每次 Write 后立即上报，因此活跃长连接可实时显示。
+type trafficWriter struct {
+	dst    io.Writer
+	report func(int64)
+}
+
+func (w trafficWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 && w.report != nil {
+		w.report(int64(n))
 	}
+	return n, err
 }
 
 // portOfConn 返回本地监听端口（即客户端想连的端口）。
