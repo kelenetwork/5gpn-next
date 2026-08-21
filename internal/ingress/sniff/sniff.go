@@ -17,6 +17,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,11 +67,17 @@ type Server struct {
 	// 只作兜底，绝不覆盖显式嗅探结果。
 	HintLookup func(client string) (string, bool)
 
+	// ClientCIDR 限定可使用接管入口的客户端网段；零值仅用于测试或
+	// 显式关闭限制的兼容场景。防火墙是第一层，这里必须再做应用层校验，
+	// 避免宿主 INPUT 默认放行时退化成公网开放代理。
+	ClientCIDR netip.Prefix
+
 	Handled atomic.Int64
 	Failed  atomic.Int64
 	NoHost  atomic.Int64
 	Hinted  atomic.Int64
 	Refused atomic.Int64 // 因超过并发上限而被拒的连接数
+	Denied  atomic.Int64 // 因来源不在客户端网段而拒绝的连接数
 
 	seq atomic.Uint64
 
@@ -94,6 +101,27 @@ func (s *Server) release() {
 	case <-s.sem:
 	default:
 	}
+}
+
+func (s *Server) allowedClient(a net.Addr) bool {
+	if !s.ClientCIDR.IsValid() {
+		return true
+	}
+	var ip net.IP
+	switch v := a.(type) {
+	case *net.TCPAddr:
+		ip = v.IP
+	case *net.UDPAddr:
+		ip = v.IP
+	default:
+		host, _, err := net.SplitHostPort(a.String())
+		if err != nil {
+			return false
+		}
+		ip = net.ParseIP(host)
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	return ok && s.ClientCIDR.Contains(addr.Unmap())
 }
 
 // ListenAndServe 在指定端口接管流量。tls 为 true 时按 TLS ClientHello 解析。
@@ -120,6 +148,11 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, isTLS bool) er
 			if ctx.Err() != nil {
 				return nil
 			}
+			continue
+		}
+		if !s.allowedClient(c.RemoteAddr()) {
+			s.Denied.Add(1)
+			_ = c.Close()
 			continue
 		}
 		// 并发闸门必须在开 goroutine 之前：否则限流本身也会先分配一个

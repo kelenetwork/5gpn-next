@@ -8,7 +8,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/netip"
 	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +23,121 @@ const (
 	quicComment = "5gpn-quic-takeover"
 	cmdTimeout  = 5 * time.Second
 )
+
+// EnsureIngressRestrictions 为已监听端口补齐“客户端放行 + 公网丢弃”。
+//
+// install.sh 会为新装机器写完整规则，但内置自更新只替换二进制，不会重跑
+// 安装器；生产旧机因此可能长期只有 allow、没有兜底 drop。这里在每次新版
+// 启动时幂等补齐，使安全修复真正覆盖存量部署。应用层仍保留第二道校验。
+func EnsureIngressRestrictions(ctx context.Context, clientCIDR string, tcpPorts, udpPorts []int) (changed bool, err error) {
+	pfx, err := netip.ParsePrefix(clientCIDR)
+	if err != nil {
+		return false, fmt.Errorf("客户端网段无效: %w", err)
+	}
+	family := "ip"
+	if pfx.Addr().Is6() {
+		family = "ip6"
+	}
+	cidr := pfx.Masked().String()
+	rules, err := listChain(ctx)
+	if err != nil {
+		return false, err
+	}
+	hasComment := func(comments ...string) bool {
+		for _, r := range rules {
+			for _, comment := range comments {
+				if strings.Contains(r.text, `comment "`+comment+`"`) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// 通用 installer 规则存在时不再制造重复项；旧版 legacy allow 也视为
+	// 覆盖默认 DNS 端口。缺失时用端口级 comment，避免中途失败后只补一半。
+	for _, port := range cleanPorts(tcpPorts) {
+		allowComment := "5gpn-runtime-allow-tcp-" + strconv.Itoa(port)
+		denyComment := "5gpn-runtime-deny-tcp-" + strconv.Itoa(port)
+		allowCovered := hasComment(allowComment)
+		denyCovered := hasComment(denyComment)
+		if port == firstPort(tcpPorts) {
+			allowCovered = allowCovered || hasComment("5gpn-next")
+			denyCovered = denyCovered || hasComment("5gpn-deny-public-panel")
+		}
+		if !allowCovered && hasComment("5gpn-dns", "5gpn-android") {
+			allowCovered = true
+		}
+		if !denyCovered && hasComment("5gpn-deny-public-tcp") {
+			denyCovered = true
+		}
+		if !allowCovered {
+			if err := run(ctx, "insert", "rule", "inet", "fgpn", chainName,
+				family, "saddr", cidr, "tcp", "dport", strconv.Itoa(port), "accept",
+				"comment", `"`+allowComment+`"`); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
+		if !denyCovered {
+			if err := run(ctx, "add", "rule", "inet", "fgpn", chainName,
+				"tcp", "dport", strconv.Itoa(port), "drop",
+				"comment", `"`+denyComment+`"`); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
+	}
+	for _, port := range cleanPorts(udpPorts) {
+		allowComment := "5gpn-runtime-allow-udp-" + strconv.Itoa(port)
+		denyComment := "5gpn-runtime-deny-udp-" + strconv.Itoa(port)
+		allowCovered := hasComment(allowComment, quicComment, "5gpn-android")
+		denyCovered := hasComment(denyComment, "5gpn-deny-public-udp")
+		if !allowCovered {
+			if err := run(ctx, "insert", "rule", "inet", "fgpn", chainName,
+				family, "saddr", cidr, "udp", "dport", strconv.Itoa(port), "accept",
+				"comment", `"`+allowComment+`"`); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
+		if !denyCovered {
+			if err := run(ctx, "add", "rule", "inet", "fgpn", chainName,
+				"udp", "dport", strconv.Itoa(port), "drop",
+				"comment", `"`+denyComment+`"`); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+func cleanPorts(in []int) []int {
+	seen := make(map[int]struct{}, len(in))
+	out := make([]int, 0, len(in))
+	for _, p := range in {
+		if p < 1 || p > 65535 {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func firstPort(in []int) int {
+	for _, p := range in {
+		if p >= 1 && p <= 65535 {
+			return p
+		}
+	}
+	return 0
+}
 
 // EnsureQUICAccept 让客户端的 QUIC（UDP 443）能够到达网关监听。
 //
@@ -37,16 +155,17 @@ func EnsureQUICAccept(ctx context.Context, clientCIDR string) (changed bool, err
 	var rejectHandles []string
 	hasAccept := false
 	for _, r := range rules {
-		if !strings.Contains(r.text, "udp dport 443") {
-			continue
-		}
+		// 只操作本项目带明确 comment 的“客户端 QUIC 行为”规则。
+		// 公网来源的兜底 drop 也包含 udp/443，绝不能被这里误删。
 		switch {
-		case strings.Contains(r.text, "reject"), strings.Contains(r.text, "drop"):
+		case strings.Contains(r.text, `comment "`+quicComment+`"`):
+			if strings.Contains(r.text, "accept") {
+				hasAccept = true
+			}
+		case strings.Contains(r.text, `comment "5gpn-dns-quic"`):
 			if r.handle != "" {
 				rejectHandles = append(rejectHandles, r.handle)
 			}
-		case strings.Contains(r.text, "accept"):
-			hasAccept = true
 		}
 	}
 
@@ -78,17 +197,18 @@ func RestoreQUICReject(ctx context.Context, clientCIDR string) (changed bool, er
 	var acceptHandles []string
 	hasReject := false
 	for _, r := range rules {
-		if !strings.Contains(r.text, "udp dport 443") {
-			continue
-		}
-		if strings.Contains(r.text, "reject") {
+		switch {
+		case strings.Contains(r.text, `comment "5gpn-dns-quic"`):
 			hasReject = true
-		} else if strings.Contains(r.text, "accept") && r.handle != "" {
-			acceptHandles = append(acceptHandles, r.handle)
+		case strings.Contains(r.text, `comment "`+quicComment+`"`):
+			if r.handle != "" {
+				acceptHandles = append(acceptHandles, r.handle)
+			}
 		}
 	}
 	if !hasReject {
-		if err := run(ctx, "add", "rule", "inet", "fgpn", chainName,
+		// insert 保证客户端规则位于公网兜底 drop 之前。
+		if err := run(ctx, "insert", "rule", "inet", "fgpn", chainName,
 			"ip", "saddr", clientCIDR, "udp", "dport", "443",
 			"reject", "with", "icmp", "port-unreachable",
 			"comment", `"5gpn-dns-quic"`); err != nil {
@@ -137,7 +257,8 @@ func listChain(ctx context.Context) ([]rule, error) {
 }
 
 func addAccept(ctx context.Context, clientCIDR string) error {
-	return run(ctx, "add", "rule", "inet", "fgpn", chainName,
+	// insert 保证客户端放行位于公网兜底 drop 之前。
+	return run(ctx, "insert", "rule", "inet", "fgpn", chainName,
 		"ip", "saddr", clientCIDR, "udp", "dport", "443", "accept",
 		"comment", `"`+quicComment+`"`)
 }

@@ -539,7 +539,7 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 	sb.WriteString("<i>请选择要执行的操作 ↓</i>")
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
-		[]btn{{"📊 运行状态", "status"}, {"📈 流量统计", "traffic"}},
+		[]btn{{"📊 运行状态", "status"}, {"📈 网关转发流量", "traffic"}},
 		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
 		[]btn{{"🛡 广告拦截", "adblock"}, {"🩺 连通诊断", "ask_probe"}},
 		[]btn{{"📱 客户端接入", "client"}, {"🖥 内网面板", "panel"}},
@@ -591,16 +591,17 @@ func (b *Bot) showStatus(ctx context.Context, v view) {
 func (b *Bot) showTraffic(ctx context.Context, v view) {
 	sum, ok := b.Manager.TrafficSummary()
 	if !ok {
-		b.render(ctx, v, "📈 <b>流量统计</b>\n\n统计功能未启用。", backTo("menu"))
+		b.render(ctx, v, "📈 <b>网关转发流量</b>\n\n统计功能未启用。", backTo("menu"))
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📈 <b>流量统计</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString("📈 <b>网关转发流量</b>\n")
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n")
+	sb.WriteString("<i>这里只统计经过 5gpn-NEXT 服务器的数据，不是手机总流量。</i>\n\n")
 	row := func(icon, name string, d stats.Day) {
 		fmt.Fprintf(&sb, "%s <b>%s</b>　<b>%s</b>\n", icon, name, stats.HumanBytes(d.Total()))
-		fmt.Fprintf(&sb, "<blockquote>↑ %s　↓ %s\n%d 连接 · 直连 %d / 代理 %d",
+		fmt.Fprintf(&sb, "<blockquote>↑ %s　↓ %s\n%d 连接 · 网关直出 %d / 代理出口 %d",
 			stats.HumanBytes(d.Up), stats.HumanBytes(d.Down),
 			d.Conns, d.DirectConns, d.ProxyConns)
 		if d.Blocked > 0 {
@@ -622,7 +623,7 @@ func (b *Bot) showTraffic(ctx context.Context, v view) {
 	row("📆", "近 30 天", sum.Days30)
 
 	if len(sum.TopDomain) > 0 {
-		sb.WriteString("\n🔝 <b>累计流量最高的站点</b>\n<blockquote expandable>")
+		sb.WriteString("\n🔝 <b>网关累计流量最高的站点</b>\n<blockquote expandable>")
 		for i, t := range sum.TopDomain {
 			if i >= 8 {
 				break
@@ -635,7 +636,7 @@ func (b *Bot) showTraffic(ctx context.Context, v view) {
 		}
 		sb.WriteString("</blockquote>")
 	}
-	fmt.Fprintf(&sb, "\n<i>按北京时间自然日统计；仅包含实际经过网关转发的流量，手机本地直连流量不在其中。统计自 %s 起，仅保留聚合数据。</i>",
+	fmt.Fprintf(&sb, "\n<i>按北京时间自然日统计；国内网站等手机本地直连流量不在其中。统计自 %s 起，流量统计本身仅保留聚合数据。</i>",
 		html.EscapeString(sum.Since))
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
@@ -1152,7 +1153,7 @@ func (b *Bot) doUpdateApply(ctx context.Context, v view, tag string) {
 		b.render(ctx, v, errBox("升级失败", err), backTo("update"))
 		return
 	}
-	b.render(ctx, v, "✅ <b>升级完成</b>\n\n"+html.EscapeString(msg), backTo("menu"))
+	b.render(ctx, v, "✅ <b>升级任务已启动</b>\n\n"+html.EscapeString(msg), backTo("menu"))
 }
 
 func (b *Bot) showRollback(ctx context.Context, v view) {
@@ -1183,7 +1184,7 @@ func (b *Bot) doRollback(ctx context.Context, v view, tag string) {
 		b.render(ctx, v, errBox("回退失败", err), backTo("update"))
 		return
 	}
-	b.render(ctx, v, "✅ <b>回退完成</b>\n\n"+html.EscapeString(msg), backTo("menu"))
+	b.render(ctx, v, "✅ <b>回退任务已启动</b>\n\n"+html.EscapeString(msg), backTo("menu"))
 }
 
 // ---------- 描述文件 ----------

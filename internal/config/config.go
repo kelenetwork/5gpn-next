@@ -435,8 +435,8 @@ func Load(path string) (*Config, error) {
 	return c, c.Validate()
 }
 
-// MigrateLegacyFile 把旧版配置原子改写为当前 schema。
-// 返回 changed=false 表示文件已经没有退役字段。
+// MigrateLegacyFile 把旧版配置原子改写为当前 schema，并持久化只在
+// Load 内完成的默认值迁移。返回 changed=false 表示磁盘内容已经规范化。
 func MigrateLegacyFile(path string) (changed bool, err error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -450,6 +450,24 @@ func MigrateLegacyFile(path string) (changed bool, err error) {
 		if _, ok := keys[key]; ok {
 			changed = true
 			break
+		}
+	}
+	// v0.13.8 以前把旧默认 12 小时写死在文件里。Load 虽会在内存里
+	// 改成 1 小时，但旧实现不落盘，审计磁盘配置仍会误报 12，且每次启动
+	// 都重复迁移。这里把同一语义真正持久化。
+	if raw, ok := keys["update"]; ok {
+		var u UpdateConfig
+		if err := json.Unmarshal(raw, &u); err != nil {
+			return false, fmt.Errorf("解析 update 配置失败: %w", err)
+		}
+		if u.IntervalHours == LegacyUpdateIntervalHours {
+			changed = true
+		}
+	}
+	if raw, ok := keys["final"]; ok {
+		var final string
+		if err := json.Unmarshal(raw, &final); err == nil && (final == "" || final == "proxy") {
+			changed = true
 		}
 	}
 	if !changed {

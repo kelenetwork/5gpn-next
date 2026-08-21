@@ -47,6 +47,31 @@ func TestLegacyIntervalMigratedToNewDefault(t *testing.T) {
 	}
 }
 
+func TestLegacyIntervalMigrationIsPersisted(t *testing.T) {
+	p := writeCfg(t, `{ "check_enabled": true, "interval_hours": 12, "auto_apply": false }`)
+	changed, err := MigrateLegacyFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("disk config with legacy default should be rewritten")
+	}
+	var raw struct {
+		Update UpdateConfig `json:"update"`
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.Update.IntervalHours != DefaultUpdateIntervalHours {
+		t.Fatalf("persisted interval=%d, want %d",
+			raw.Update.IntervalHours, DefaultUpdateIntervalHours)
+	}
+}
+
 // TestExplicitIntervalPreserved 用户显式设置的间隔不得被覆盖。
 // 迁移只认「恰好等于旧默认值」这一种情况，其它取值都是主动选择。
 func TestExplicitIntervalPreserved(t *testing.T) {

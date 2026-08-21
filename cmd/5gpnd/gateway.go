@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/kelenetwork/5gpn-next/internal/egress"
@@ -68,9 +70,18 @@ type httpService struct {
 	Stats   func() map[string]int64
 	Runtime *gatewayRuntime
 	Version string
+
+	// ClientCIDR 限定描述文件、状态端点与面板的来源。面板内部还有一层
+	// 校验；这里覆盖随机下载路径和 /5gpn/stats，避免只靠 nftables。
+	ClientCIDR netip.Prefix
 }
 
 func (h *httpService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !remoteAllowed(r.RemoteAddr, h.ClientCIDR) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	// 描述文件下载：iOS 下载时不带任何鉴权头，
 	// 路径含随机串本身即能力凭证。
 	if h.ProfilePath != "" && r.Method == http.MethodGet && r.URL.Path == h.ProfilePath {
@@ -105,4 +116,20 @@ func (h *httpService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func remoteAllowed(remote string, allowed netip.Prefix) bool {
+	if !allowed.IsValid() {
+		return true
+	}
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	return ip.IsLoopback() || allowed.Contains(ip)
 }

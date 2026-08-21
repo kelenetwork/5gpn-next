@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -270,21 +269,6 @@ func parseAction(s string) (policy.Action, string) {
 
 // ---------- run ----------
 
-// jsonlRecorder 把 trace 写成结构化日志。
-type jsonlRecorder struct {
-	mu sync.Mutex
-	f  *os.File
-}
-
-func (r *jsonlRecorder) Record(t *trace.Trace) {
-	if r == nil || r.f == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.f.Write(append(t.JSON(), '\n'))
-}
-
 func cmdRun(args []string) error {
 	// 两项都必须在载入规则集之前生效：启动阶段就是内存峰值所在。
 	// 先关 THP，再设 GOMEMLIMIT——前者消除内核侧放大，后者约束 Go 堆。
@@ -298,13 +282,15 @@ func cmdRun(args []string) error {
 	}
 	cleanupRetiredArtifacts(cfgPath)
 
-	var rec *jsonlRecorder
+	var rec *trace.JSONLRecorder
 	if a.cfg.LogPath != "" {
-		if err := os.MkdirAll(dirOf(a.cfg.LogPath), 0o755); err == nil {
-			if f, err := os.OpenFile(a.cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-				rec = &jsonlRecorder{f: f}
-				defer f.Close()
-			}
+		rec, err = trace.NewJSONLRecorder(
+			a.cfg.LogPath, trace.DefaultMaxLogSize, trace.DefaultLogBackups)
+		if err != nil {
+			log.Printf("警告: 初始化有界 trace 日志失败（继续运行）: %v", err)
+			rec = nil
+		} else {
+			defer rec.Close()
 		}
 	}
 
@@ -351,6 +337,7 @@ func cmdRun(args []string) error {
 			out["dial_fail"] = sniffSrv.Failed.Load()
 			out["no_host"] = sniffSrv.NoHost.Load()
 			out["hinted"] = sniffSrv.Hinted.Load()
+			out["denied_source"] = sniffSrv.Denied.Load()
 		}
 		if quicSrv != nil {
 			out["quic_handled"] = quicSrv.Handled.Load()
@@ -360,7 +347,7 @@ func cmdRun(args []string) error {
 		return out
 	}
 	mgr.Stats = statsFunc(snapshot)
-	// 流量统计：只保留聚合数据，不落原始访问日志
+	// 流量统计只保留聚合数据；连接级 trace 是独立的有界诊断日志。
 	traffic := stats.New("/var/lib/5gpn-next/traffic.json")
 	mgr.Traffic = traffic
 	trafficDone := make(chan struct{})
@@ -375,7 +362,11 @@ func cmdRun(args []string) error {
 		<-trafficStopped
 	}()
 
-	// 版本管理
+	// 版本管理。先清理旧版自更新因进程被 restart 杀掉而永久遗留的
+	// staging，并限制可回退二进制数量；失败只告警，不影响数据面启动。
+	if err := update.CleanupState(); err != nil {
+		log.Printf("警告: %v", err)
+	}
 	updater := update.New(version)
 	mgr.Updater = updater
 
@@ -471,6 +462,30 @@ func cmdRun(args []string) error {
 		}
 	}()
 
+	clientPfx, perr := netip.ParsePrefix(a.cfg.ClientCIDR)
+	if perr != nil {
+		return fmt.Errorf("client_cidr 无效: %w", perr)
+	}
+
+	// 自更新只替换二进制，不会重跑 install.sh。每次启动都在现有 fgpn
+	// 链上幂等补齐客户端放行与公网 drop，确保安全修复覆盖生产存量机器。
+	tcpPorts := []int{portOf(a.cfg.Gateway.Listen)}
+	var udpPorts []int
+	if a.cfg.DNS.Enabled {
+		tcpPorts = append(tcpPorts,
+			portOf(a.cfg.DNS.HTTPListen), portOf(a.cfg.DNS.TLSListen), portOf(a.cfg.DNS.DoTListen))
+		if a.cfg.DNS.QUICTakeoverEnabled() {
+			udpPorts = append(udpPorts, portOf(a.cfg.DNS.TLSListen))
+		}
+	}
+	fwCtx, fwCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if changed, ferr := fw.EnsureIngressRestrictions(fwCtx, a.cfg.ClientCIDR, tcpPorts, udpPorts); ferr != nil {
+		log.Printf("警告: 补齐入口访问控制失败（应用层限制仍生效）: %v", ferr)
+	} else if changed {
+		log.Printf("已补齐入口防火墙：仅允许 %s 访问网关端口", a.cfg.ClientCIDR)
+	}
+	fwCancel()
+
 	// 内网 Web 面板：挂在根路径，仅内网卡来源可达，无需登录
 	var panelHandler http.Handler
 	if a.cfg.Panel.Enabled {
@@ -502,11 +517,6 @@ func cmdRun(args []string) error {
 		// 同时登记域名：SOCKS5 由远端解析目标，DIRECT 的 ControlContext
 		// 看不到它的最终 IP；精确拦截网关域名可防跨出口递归回本机。
 		egress.SetGatewayHost(a.cfg.Gateway.Host)
-		clientPfx, perr := netip.ParsePrefix(a.cfg.ClientCIDR)
-		if perr != nil {
-			return fmt.Errorf("client_cidr 无效: %w", perr)
-		}
-
 		// DNS 线索表：DoT 改写时记录「客户端→域名」，无 SNI 私有协议
 		// （如 WhatsApp Noise）嗅探失败时用它回退还原目的地。
 		hints := hint.New()
@@ -518,6 +528,7 @@ func cmdRun(args []string) error {
 			OnConn:     traffic.Conn,
 			OnTraffic:  traffic.Traffic,
 			HintLookup: hints.Lookup,
+			ClientCIDR: clientPfx,
 		}
 		sniffSrv = sn
 		go func() {
@@ -650,7 +661,7 @@ func cmdRun(args []string) error {
 				t := time.NewTicker(iv)
 				defer t.Stop()
 				// 启动后先查一次再进入周期循环。否则新装或刚重启的机器要空等
-				//满一个周期（默认 12 小时）才可能收到提醒，期间用户完全不知道
+				// 满一个周期才可能收到提醒，期间用户完全不知道
 				// 已有新版本。延迟 20 秒是为了让 Bot 与网络就绪，避免开机瞬间
 				// 查询失败白白浪费这一次。
 				first := time.NewTimer(20 * time.Second)
@@ -693,6 +704,7 @@ func cmdRun(args []string) error {
 		Stats:        snapshot,
 		Runtime:      rt,
 		Version:      version,
+		ClientCIDR:   clientPfx,
 	}
 
 	cert, err := tls.LoadX509KeyPair(a.cfg.Gateway.CertFile, a.cfg.Gateway.KeyFile)

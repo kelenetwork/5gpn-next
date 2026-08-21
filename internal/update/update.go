@@ -17,7 +17,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -49,16 +48,18 @@ type Manager struct {
 	Current string
 	client  *http.Client
 
-	mu       sync.Mutex
-	lastSeen string // 最近一次已通知过的版本，避免重复推送
-	busy     bool
+	mu           sync.Mutex
+	lastSeen     string // 最近一次已通知过的版本，避免重复推送
+	notifiedPath string // 测试可注入；生产固定在 stateDir
+	busy         bool
 }
 
 // New 构造 Manager。
 func New(current string) *Manager {
 	return &Manager{
-		Current: current,
-		client:  &http.Client{Timeout: 60 * time.Second},
+		Current:      current,
+		client:       &http.Client{Timeout: 60 * time.Second},
+		notifiedPath: notifiedFile,
 	}
 }
 
@@ -116,9 +117,13 @@ const notifiedFile = stateDir + "/notified-version"
 func (m *Manager) ShouldNotify(tag string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	path := m.notifiedPath
+	if path == "" {
+		path = notifiedFile
+	}
 	if m.lastSeen == "" {
 		// 首次调用：从磁盘恢复，避免重启后重复提醒。
-		if b, err := os.ReadFile(notifiedFile); err == nil {
+		if b, err := os.ReadFile(path); err == nil {
 			m.lastSeen = strings.TrimSpace(string(b))
 		}
 	}
@@ -127,8 +132,13 @@ func (m *Manager) ShouldNotify(tag string) bool {
 	}
 	m.lastSeen = tag
 	// 落盘失败不影响本次通知，最坏退化成旧的「重启后重复提醒一次」。
-	if err := os.MkdirAll(stateDir, 0o750); err == nil {
-		_ = os.WriteFile(notifiedFile, []byte(tag+"\n"), 0o644)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err == nil {
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, []byte(tag+"\n"), 0o600); err == nil {
+			if err := os.Rename(tmp, path); err != nil {
+				_ = os.Remove(tmp)
+			}
+		}
 	}
 	return true
 }
@@ -175,7 +185,12 @@ func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(tmpDir)
+	scheduled := false
+	defer func() {
+		if !scheduled {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
 
 	binTmp := filepath.Join(tmpDir, asset)
 	if err := m.download(ctx, base+"/"+asset, binTmp, maxBinSize); err != nil {
@@ -204,28 +219,22 @@ func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
 		return "", err
 	}
 	backup := filepath.Join(backupDir, "5gpnd-"+sanitizeTag(m.Current))
-	if b, err := os.ReadFile(binPath); err == nil {
-		_ = os.WriteFile(backup, b, 0o755)
+	b, err := os.ReadFile(binPath)
+	if err != nil {
+		return "", fmt.Errorf("读取当前版本用于回退失败: %w", err)
+	}
+	if err := os.WriteFile(backup, b, 0o755); err != nil {
+		return "", fmt.Errorf("备份当前版本失败: %w", err)
 	}
 
-	if err := installBinary(binTmp); err != nil {
+	// 必须让独立 transient unit 执行替换、重启和验证。若在主服务内
+	// systemctl restart 后继续验证，调用进程会先被 systemd 杀掉，后续
+	// 代码与 defer 根本不会运行，也就不可能真正自动回退。
+	if err := scheduleTransaction(ctx, binTmp, backup, m.Current, tag, tmpDir); err != nil {
 		return "", err
 	}
-
-	// 重启并验证
-	if err := systemctl(ctx, "restart", "5gpn-next.service"); err != nil {
-		m.rollbackFile(backup)
-		_ = systemctl(ctx, "restart", "5gpn-next.service")
-		return "", fmt.Errorf("重启失败，已回退到 %s: %w", m.Current, err)
-	}
-	time.Sleep(4 * time.Second)
-	if !serviceActive(ctx) {
-		m.rollbackFile(backup)
-		_ = systemctl(ctx, "restart", "5gpn-next.service")
-		return "", fmt.Errorf("新版本启动失败，已回退到 %s", m.Current)
-	}
-
-	return fmt.Sprintf("已升级到 %s（原版本 %s 已备份，可随时回退）", tag, m.Current), nil
+	scheduled = true
+	return fmt.Sprintf("%s 已下载并通过哈希校验；5 秒后重启，失败会由独立事务自动回退到 %s", tag, m.Current), nil
 }
 
 // Versions 列出可回退的备份版本。
@@ -241,36 +250,65 @@ func (m *Manager) Versions() []string {
 		}
 		out = append(out, strings.TrimPrefix(e.Name(), "5gpnd-"))
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	sort.Slice(out, func(i, j int) bool {
+		if Newer(out[i], out[j]) {
+			return true
+		}
+		if Newer(out[j], out[i]) {
+			return false
+		}
+		return out[i] > out[j]
+	})
 	return out
 }
 
 // Rollback 回退到指定备份版本。
 func (m *Manager) Rollback(ctx context.Context, tag string) (string, error) {
+	m.mu.Lock()
+	if m.busy {
+		m.mu.Unlock()
+		return "", fmt.Errorf("已有更新任务在执行中")
+	}
+	m.busy = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.busy = false
+		m.mu.Unlock()
+	}()
+
 	backup := filepath.Join(backupDir, "5gpnd-"+sanitizeTag(tag))
 	if _, err := os.Stat(backup); err != nil {
 		return "", fmt.Errorf("没有 %s 的备份", tag)
 	}
-	// 回退前先把当前版本也备份，便于再回来
-	cur := filepath.Join(backupDir, "5gpnd-"+sanitizeTag(m.Current))
-	if b, err := os.ReadFile(binPath); err == nil {
-		_ = os.WriteFile(cur, b, 0o755)
-	}
-	if err := installBinary(backup); err != nil {
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
 		return "", err
 	}
-	if err := systemctl(ctx, "restart", "5gpn-next.service"); err != nil {
-		return "", fmt.Errorf("重启失败: %w", err)
+	staging, err := os.MkdirTemp(stateDir, "update-")
+	if err != nil {
+		return "", err
 	}
-	time.Sleep(3 * time.Second)
-	if !serviceActive(ctx) {
-		return "", fmt.Errorf("回退后服务未能启动，请检查 journalctl -u 5gpn-next")
-	}
-	return fmt.Sprintf("已回退到 %s", tag), nil
-}
+	scheduled := false
+	defer func() {
+		if !scheduled {
+			_ = os.RemoveAll(staging)
+		}
+	}()
 
-func (m *Manager) rollbackFile(backup string) {
-	_ = installBinary(backup)
+	// 回退前先把当前版本也备份，若目标版本起不来可恢复。
+	cur := filepath.Join(backupDir, "5gpnd-"+sanitizeTag(m.Current))
+	b, err := os.ReadFile(binPath)
+	if err != nil {
+		return "", fmt.Errorf("读取当前版本用于回退保护失败: %w", err)
+	}
+	if err := os.WriteFile(cur, b, 0o755); err != nil {
+		return "", fmt.Errorf("保存当前版本失败: %w", err)
+	}
+	if err := scheduleTransaction(ctx, backup, cur, m.Current, tag, staging); err != nil {
+		return "", err
+	}
+	scheduled = true
+	return fmt.Sprintf("已排队回退到 %s；5 秒后重启，若目标版本无法启动会恢复 %s", tag, m.Current), nil
 }
 
 // ---------- 内部工具 ----------
@@ -304,51 +342,6 @@ func (m *Manager) download(ctx context.Context, url, dst string, limit int64) er
 	return nil
 }
 
-// installBinary 把 src 安装为 binPath（原子替换）。
-//
-// 服务 unit 使用 ProtectSystem=full 沙箱，进程内 /usr 是只读挂载，
-// 直接写入会得到 EROFS。此时降级为 systemd-run：请求 PID 1 在
-// 沙箱之外以瞬态单元执行复制，不放宽服务本身的沙箱限制。
-// src 必须位于沙箱内外都可见的真实路径（如 stateDir）。
-func installBinary(src string) error {
-	directErr := replaceBinary(src)
-	if directErr == nil {
-		return nil
-	}
-	if err := installViaSystemdRun(src); err != nil {
-		return fmt.Errorf("直接写入失败（%v），沙箱外安装也失败: %w", directErr, err)
-	}
-	return nil
-}
-
-func installViaSystemdRun(src string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	script := fmt.Sprintf(
-		"cp -f %q %q.new && chmod 755 %q.new && mv -f %q.new %q",
-		src, binPath, binPath, binPath, binPath)
-	out, err := exec.CommandContext(ctx, "systemd-run",
-		"--quiet", "--wait", "--collect",
-		"--property=Type=oneshot",
-		"/bin/sh", "-c", script).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func replaceBinary(src string) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	tmp := binPath + ".new"
-	if err := os.WriteFile(tmp, b, 0o755); err != nil {
-		return err
-	}
-	return os.Rename(tmp, binPath)
-}
-
 func fileSHA256(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -376,23 +369,6 @@ func lookupSum(path, asset string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("校验清单中没有 %s 的记录", asset)
-}
-
-func systemctl(ctx context.Context, args ...string) error {
-	c, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, "systemctl", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func serviceActive(ctx context.Context) bool {
-	c, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	out, _ := exec.CommandContext(c, "systemctl", "is-active", "5gpn-next.service").Output()
-	return strings.TrimSpace(string(out)) == "active"
 }
 
 func goarch() string {

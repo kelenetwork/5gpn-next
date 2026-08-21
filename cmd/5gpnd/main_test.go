@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"testing"
 
@@ -8,6 +10,30 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/ruleset"
 )
+
+func TestHTTPServiceRejectsPublicSourceBeforeRouting(t *testing.T) {
+	h := &httpService{ClientCIDR: netip.MustParsePrefix("172.22.0.0/16")}
+	req := httptest.NewRequest(http.MethodGet, "https://gateway.example/5gpn/stats", nil)
+	req.RemoteAddr = "203.0.113.5:45678"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", w.Code)
+	}
+}
+
+func TestHTTPServiceAllowsClientAndLoopback(t *testing.T) {
+	h := &httpService{ClientCIDR: netip.MustParsePrefix("172.22.0.0/16")}
+	for _, remote := range []string{"172.22.9.8:45678", "127.0.0.1:45678", "[::1]:45678"} {
+		req := httptest.NewRequest(http.MethodGet, "https://gateway.example/missing", nil)
+		req.RemoteAddr = remote
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("remote=%s status=%d, want 404 after access allowed", remote, w.Code)
+		}
+	}
+}
 
 func readyEngine() *policy.Engine {
 	e := policy.New()

@@ -2,6 +2,7 @@ package stats
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -33,6 +34,35 @@ func TestAdBlockSuccessPersistsCountsAndRecentRecords(t *testing.T) {
 	got = reloaded.AdBlockSummary(10, 10)
 	if got.Total != 3 || got.Today != 3 || len(got.Recent) != 3 || got.Top[0].Count != 2 {
 		t.Fatalf("ad-block statistics did not survive reload: %+v", got)
+	}
+}
+
+func TestFlushRetriesSameSnapshotAfterWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(blocker, "traffic.json")
+	s := New(path)
+	s.Traffic("example.com", 123, 456)
+	if err := s.Flush(); err == nil {
+		t.Fatal("first flush should fail while parent is a regular file")
+	}
+
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(blocker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 没有新增流量；仍能成功写出，证明失败路径恢复了 dirty。
+	if err := s.Flush(); err != nil {
+		t.Fatalf("retry flush failed: %v", err)
+	}
+	loaded := New(path).Summary(7, 10)
+	if loaded.Today.Up != 123 || loaded.Today.Down != 456 {
+		t.Fatalf("persisted traffic=%d/%d, want 123/456", loaded.Today.Up, loaded.Today.Down)
 	}
 }
 

@@ -29,6 +29,15 @@ die()  { printf '%s✗%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
 step() { printf '\n%s==>%s %s\n' "$C_OK" "$C_OFF" "$*"; }
 dim()  { printf '%s  %s%s\n' "$C_DIM" "$*" "$C_OFF"; }
 
+remove_acme_nft_rules() {
+  local handle
+  while read -r handle; do
+    [ -n "$handle" ] || continue
+    nft delete rule inet fgpn input handle "$handle" 2>/dev/null || true
+  done < <(nft -a list chain inet fgpn input 2>/dev/null \
+    | awk '/comment "5gpn-acme-tmp"/ { for (i=1; i<=NF; i++) if ($i=="handle") print $(i+1) }')
+}
+
 [ "$(id -u)" = "0" ] || die "需要 root 权限，请用 sudo 运行"
 
 # ---------------------------------------------------------------- 0. 环境检查
@@ -194,6 +203,8 @@ install -d -m 755 "$LIBDIR/rulesets" "$LOGDIR"
 CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 KEY="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 
+# 清掉中断的旧签发流程可能遗留的临时公网放行。
+remove_acme_nft_rules
 if [ -s "$CERT" ] && [ -s "$KEY" ]; then
   ok "已存在证书，跳过签发"
 else
@@ -203,13 +214,19 @@ else
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot >/dev/null 2>&1 \
       || die "certbot 安装失败，请手动安装后重试"
   }
-  # HTTP-01 需要 80 端口，临时放行
-  nft list chain inet fgpn input >/dev/null 2>&1 && \
-    nft add rule inet fgpn input tcp dport 80 accept comment '"5gpn-acme-tmp"' 2>/dev/null || true
+  # HTTP-01 需要公网访问 80；insert 保证临时规则位于兜底 drop 之前。
+  if nft list chain inet fgpn input >/dev/null 2>&1; then
+    nft insert rule inet fgpn input tcp dport 80 accept comment '"5gpn-acme-tmp"' \
+      || die "临时放行 ACME 端口失败"
+  fi
 
+  cert_rc=0
   # shellcheck disable=SC2086
   certbot certonly --standalone --non-interactive --agree-tos \
     $CERT_EMAIL_ARG -d "$DOMAIN" --keep-until-expiring >/dev/null 2>&1 \
+    || cert_rc=$?
+  remove_acme_nft_rules
+  [ "$cert_rc" -eq 0 ] \
     || die "证书签发失败。请确认：域名已指向本机、80 端口公网可达、云厂商安全组已放行 80"
   ok "证书签发成功"
 fi
@@ -267,6 +284,19 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+UMask=0077
 ReadWritePaths=/var/lib/mihomo-5gpn
 MemoryMax=192M
 LimitNOFILE=65535
@@ -404,9 +434,10 @@ if [ "$DNS_ON" = "true" ]; then
   # 旧版在此 reject 指望客户端回落 TCP，但 Google Play 下载器不回落，
   # 只会无限重试，表现为「下载永远等待中」，因此必须放行。
   DNS_NFT=$(cat <<NFTEOF
-    ip saddr ${CLIENT_CIDR} tcp dport { 53, 80, 443, 853 } accept comment "5gpn-dns"
-    ip saddr ${CLIENT_CIDR} udp dport 53 accept comment "5gpn-dns"
+    ip saddr ${CLIENT_CIDR} tcp dport { 80, 443, 853 } accept comment "5gpn-dns"
     ip saddr ${CLIENT_CIDR} udp dport 443 accept comment "5gpn-quic-takeover"
+    tcp dport { 80, 443, 853 } drop comment "5gpn-deny-public-tcp"
+    udp dport 443 drop comment "5gpn-deny-public-udp"
 NFTEOF
 )
   DNS_NFT="${DNS_NFT}
@@ -421,12 +452,13 @@ table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
-${DNS_NFT}  }
+${DNS_NFT}    tcp dport ${LISTEN_PORT} drop comment "5gpn-deny-public-panel"
+  }
 }
 EOF
-ok "已放行 ${LISTEN_PORT}/tcp（仅来源 ${CLIENT_CIDR}）"
+ok "已限制 ${LISTEN_PORT}/tcp 仅来源 ${CLIENT_CIDR}"
 if [ "$DNS_ON" = "true" ]; then
-  ok "已放行 853/80/443（加密 DNS 接入，仅来源 ${CLIENT_CIDR}）"
+  ok "已限制 853/80/443 仅来源 ${CLIENT_CIDR}（ACME 续期时临时开放 80）"
 fi
 
 cat > "$CFGDIR/nft-restore.sh" <<EOF
@@ -439,7 +471,8 @@ table inet fgpn {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr ${CLIENT_CIDR} tcp dport ${LISTEN_PORT} accept comment "5gpn-next"
-${DNS_NFT}  }
+${DNS_NFT}    tcp dport ${LISTEN_PORT} drop comment "5gpn-deny-public-panel"
+  }
 }
 RULES
 EOF
@@ -481,6 +514,19 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+UMask=0077
 ReadWritePaths=/var/lib/5gpn-next /var/log/5gpn-next
 # 内存上限必须同时容纳 Go 堆与内核侧记账。生产实测 OOM 现场：
 #   anon 132MB（Go 堆）+ slab_unreclaimable 123MB（socket 缓冲等
@@ -514,25 +560,45 @@ install -d -m 755 /etc/letsencrypt/renewal-hooks/pre \
 
 cat > /etc/letsencrypt/renewal-hooks/pre/5gpn-next.sh <<'EOF'
 #!/bin/bash
-# 续期前停服让出 :80。仅在服务确实在运行时记录状态，避免把本就停止的
-# 服务在续期后被误启动。
+# 续期前停服让出 :80，并把 ACME 临时放行插到公网兜底 drop 之前。
+# 仅在服务确实运行时记录状态，避免续期后误启动本就停止的服务。
 set -u
 STATE=/run/5gpn-next-cert-renew.state
+rm_rules() {
+  local handle
+  while read -r handle; do
+    [ -n "$handle" ] || continue
+    nft delete rule inet fgpn input handle "$handle" 2>/dev/null || true
+  done < <(nft -a list chain inet fgpn input 2>/dev/null \
+    | awk '/comment "5gpn-acme-tmp"/ { for (i=1; i<=NF; i++) if ($i=="handle") print $(i+1) }')
+}
+rm_rules
 if systemctl is-active --quiet 5gpn-next.service; then
   echo stopped-by-certbot > "$STATE"
   systemctl stop 5gpn-next.service
 else
   rm -f "$STATE"
 fi
+if nft list chain inet fgpn input >/dev/null 2>&1; then
+  if ! nft insert rule inet fgpn input tcp dport 80 accept comment '"5gpn-acme-tmp"'; then
+    [ -f "$STATE" ] && systemctl start 5gpn-next.service || true
+    rm -f "$STATE"
+    exit 1
+  fi
+fi
 exit 0
 EOF
 
 cat > /etc/letsencrypt/renewal-hooks/post/5gpn-next.sh <<'EOF'
 #!/bin/bash
-# 无论续期成功与否都必须恢复服务：certbot 在失败路径同样执行 post 钩子，
-# 漏掉会让网关一直停着。
+# 无论续期成功与否都先收回 ACME 临时公网放行，再恢复网关服务。
 set -u
 STATE=/run/5gpn-next-cert-renew.state
+while read -r handle; do
+  [ -n "$handle" ] || continue
+  nft delete rule inet fgpn input handle "$handle" 2>/dev/null || true
+done < <(nft -a list chain inet fgpn input 2>/dev/null \
+  | awk '/comment "5gpn-acme-tmp"/ { for (i=1; i<=NF; i++) if ($i=="handle") print $(i+1) }')
 if [ -f "$STATE" ]; then
   rm -f "$STATE"
   systemctl start 5gpn-next.service || true

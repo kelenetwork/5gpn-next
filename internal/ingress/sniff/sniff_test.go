@@ -4,10 +4,30 @@ import (
 	"bufio"
 	"errors"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestAllowedClientEnforcesConfiguredCIDR(t *testing.T) {
+	s := &Server{ClientCIDR: netip.MustParsePrefix("172.22.0.0/16")}
+	for _, tc := range []struct {
+		name string
+		addr net.Addr
+		want bool
+	}{
+		{"client", &net.TCPAddr{IP: net.ParseIP("172.22.7.9"), Port: 1234}, true},
+		{"public", &net.TCPAddr{IP: net.ParseIP("203.0.113.8"), Port: 1234}, false},
+		{"ipv6", &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1234}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := s.allowedClient(tc.addr); got != tc.want {
+				t.Fatalf("allowedClient(%s)=%v, want %v", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestPeekHTTPHostDoesNotBlockOnShortRequest 锁定线上事故：
 //

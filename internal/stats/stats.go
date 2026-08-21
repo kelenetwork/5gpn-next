@@ -7,6 +7,7 @@ package stats
 
 import (
 	"encoding/json"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -57,10 +58,11 @@ type persisted struct {
 
 // Store 是统计存储。
 type Store struct {
-	mu   sync.Mutex
-	path string
-	data persisted
-	now  func() time.Time
+	mu      sync.Mutex
+	flushMu sync.Mutex
+	path    string
+	data    persisted
+	now     func() time.Time
 
 	dirty            bool
 	maxDays          int
@@ -113,8 +115,13 @@ func (s *Store) load() {
 	s.data = p
 }
 
-// Flush 原子写盘。
+// Flush 原子写盘。磁盘错误时必须恢复 dirty：旧实现先清 dirty 再写文件，
+// 一次 ENOSPC/EROFS 后若没有新流量，后续周期会误以为无需落盘，刚才那批
+// 聚合永久丢失。flushMu 同时避免手工 Flush 与后台 ticker 争用同一 .tmp。
 func (s *Store) Flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	s.mu.Lock()
 	if !s.dirty {
 		s.mu.Unlock()
@@ -122,32 +129,55 @@ func (s *Store) Flush() error {
 	}
 	s.prune()
 	b, err := json.Marshal(s.data)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	// 允许数据面继续写；若本次 I/O 失败，下方会重新置 dirty。
 	s.dirty = false
 	s.mu.Unlock()
-	if err != nil {
+
+	failed := func(err error) error {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
+		return failed(err)
 	}
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
+		return failed(err)
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
+		return failed(err)
+	}
+	return nil
 }
 
 // RunFlusher 周期落盘，直到 done 关闭。
 func (s *Store) RunFlusher(done <-chan struct{}, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
+	var lastWarn time.Time
+	flush := func() {
+		if err := s.Flush(); err != nil {
+			now := time.Now()
+			if lastWarn.IsZero() || now.Sub(lastWarn) >= time.Minute {
+				log.Printf("警告: 流量聚合落盘失败（保留 dirty，稍后重试）: %v", err)
+				lastWarn = now
+			}
+		}
+	}
 	for {
 		select {
 		case <-done:
-			_ = s.Flush()
+			flush()
 			return
 		case <-t.C:
-			_ = s.Flush()
+			flush()
 		}
 	}
 }

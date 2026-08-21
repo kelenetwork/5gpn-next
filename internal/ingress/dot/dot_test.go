@@ -11,6 +11,38 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 )
 
+type captureDNSWriter struct {
+	remote net.Addr
+	msg    *dns.Msg
+}
+
+func (w *captureDNSWriter) LocalAddr() net.Addr         { return &net.TCPAddr{} }
+func (w *captureDNSWriter) RemoteAddr() net.Addr        { return w.remote }
+func (w *captureDNSWriter) Close() error                { return nil }
+func (w *captureDNSWriter) TsigStatus() error           { return nil }
+func (w *captureDNSWriter) TsigTimersOnly(bool)         {}
+func (w *captureDNSWriter) Hijack()                     {}
+func (w *captureDNSWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *captureDNSWriter) WriteMsg(m *dns.Msg) error {
+	w.msg = m.Copy()
+	return nil
+}
+
+func TestNonClientIsRefusedInsteadOfOpenRecursion(t *testing.T) {
+	s := &Server{ClientCIDR: netip.MustParsePrefix("172.22.0.0/16")}
+	w := &captureDNSWriter{remote: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 53000}}
+	req := new(dns.Msg)
+	req.SetQuestion("example.com.", dns.TypeA)
+
+	s.handle(w, req)
+	if w.msg == nil {
+		t.Fatal("non-client request received no response")
+	}
+	if w.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode=%s, want REFUSED", dns.RcodeToString[w.msg.Rcode])
+	}
+}
+
 func TestAnswerAddrsAndCachedLookup(t *testing.T) {
 	qname := "unknown.example."
 	cached := new(dns.Msg)

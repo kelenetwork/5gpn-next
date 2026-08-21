@@ -89,6 +89,54 @@ func TestAdBlockAPIManagesAllowlist(t *testing.T) {
 	}
 }
 
+func TestAPIRejectsCrossSiteAndNonJSONWrites(t *testing.T) {
+	panel, mgr := testPanel(t)
+	h := panel.Handler()
+
+	cross := httptest.NewRequest(http.MethodPost, "https://gateway.example/api/adblock",
+		bytes.NewBufferString(`{"action":"allow","domain":"evil.example"}`))
+	cross.Host = "gateway.example"
+	cross.Header.Set("Content-Type", "application/json")
+	cross.Header.Set("Origin", "https://evil.example")
+	cross.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossRec := httptest.NewRecorder()
+	h.ServeHTTP(crossRec, cross)
+	if crossRec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site status=%d, want 403", crossRec.Code)
+	}
+
+	plain := httptest.NewRequest(http.MethodPost, "https://gateway.example/api/adblock",
+		strings.NewReader(`{"action":"allow","domain":"evil.example"}`))
+	plain.Host = "gateway.example"
+	plain.Header.Set("Content-Type", "text/plain")
+	plainRec := httptest.NewRecorder()
+	h.ServeHTTP(plainRec, plain)
+	if plainRec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("plain write status=%d, want 415", plainRec.Code)
+	}
+	if got := mgr.AdAllowlist(); len(got) != 0 {
+		t.Fatalf("rejected writes mutated allowlist: %v", got)
+	}
+}
+
+func TestAPIAcceptsSameOriginJSONWrite(t *testing.T) {
+	panel, mgr := testPanel(t)
+	req := httptest.NewRequest(http.MethodPost, "https://gateway.example/api/adblock",
+		bytes.NewBufferString(`{"action":"allow","domain":"safe.example"}`))
+	req.Host = "gateway.example"
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Origin", "https://gateway.example")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	panel.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-origin status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := mgr.AdAllowlist(); len(got) != 1 || got[0] != "safe.example" {
+		t.Fatalf("same-origin write not applied: %v", got)
+	}
+}
+
 func TestLandingPageUsesCurrentProductCopy(t *testing.T) {
 	panel, _ := testPanel(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

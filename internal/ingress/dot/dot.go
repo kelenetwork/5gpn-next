@@ -6,8 +6,8 @@
 //	代理域名  → A 记录改写为网关自身 IP，流量因此回到网关，
 //	            再由 sniff 包嗅探 SNI/Host 还原目的地
 //
-// 安全边界：只对配置的客户端网段改写。其它来源按普通递归 DNS 处理，
-// 避免把网关变成开放的污染型解析器。
+// 安全边界：只接受配置的客户端网段。其它来源直接 REFUSED，避免宿主
+// 防火墙默认放行时把网关变成公网开放递归解析器。
 package dot
 
 import (
@@ -152,9 +152,12 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	// 非客户端来源：普通转发，不做任何改写
+	// 非客户端来源一律拒绝。旧实现会替公网来源做普通递归查询，宿主
+	// INPUT 默认放行时等同开放 DoT resolver，既可被滥用也会泄露运行面。
 	if !fromClient {
-		s.forwardAndWrite(w, req, false, qname)
+		m := new(dns.Msg)
+		m.SetRcode(req, dns.RcodeRefused)
+		_ = w.WriteMsg(m)
 		return
 	}
 

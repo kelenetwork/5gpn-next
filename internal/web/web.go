@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -134,8 +135,36 @@ func (p *Panel) apiGuard(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "来源不允许"})
 			return
 		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			// 面板没有账号体系，网络来源是第一道认证；浏览器写请求还必须
+			// 同源并使用 JSON，阻止用户访问恶意网页时被跨站静默改出口/规则。
+			if !sameOriginWrite(r) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "拒绝跨站写请求"})
+				return
+			}
+			if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+				writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "写请求必须使用 application/json"})
+				return
+			}
+		}
 		next(w, r)
 	}
+}
+
+func sameOriginWrite(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		// 非浏览器运维客户端通常不带 Origin；JSON Content-Type 仍是硬门槛。
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 // ---------- 页面 ----------
