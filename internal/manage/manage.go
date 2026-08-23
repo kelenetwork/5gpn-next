@@ -65,6 +65,20 @@ type Manager struct {
 	started time.Time
 }
 
+// ProfileDownloadURL 返回当前蜂窝 DNS 描述文件的 HTTPS 下载地址。
+// 未启用 DoT、缺少 host 或随机路径时为空。
+func (m *Manager) ProfileDownloadURL() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.Cfg == nil {
+		return ""
+	}
+	return m.Cfg.ProfileDownloadURL()
+}
+
 // AndroidGuide 是 Android 接入指引。
 type AndroidGuide struct {
 	Enabled   bool   `json:"enabled"`

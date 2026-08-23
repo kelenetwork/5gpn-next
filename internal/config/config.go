@@ -377,6 +377,46 @@ func normalizeRule(r string) string {
 
 func boolPtr(v bool) *bool { return &v }
 
+// ListenPort 解析 listen 地址里的端口；缺省或无法解析时按 443。
+func ListenPort(listen string) int {
+	i := strings.LastIndex(listen, ":")
+	if i < 0 {
+		return 443
+	}
+	p := 0
+	for _, c := range listen[i+1:] {
+		if c < '0' || c > '9' {
+			return 443
+		}
+		p = p*10 + int(c-'0')
+	}
+	if p == 0 {
+		return 443
+	}
+	return p
+}
+
+// ProfileDownloadURL 返回 iOS 描述文件的 HTTPS 下载地址。
+// 路径含随机串，等同安装口令；仅内网卡来源可访问。
+func (c *Config) ProfileDownloadURL() string {
+	if c == nil || !c.DNS.Enabled {
+		return ""
+	}
+	host := strings.TrimSpace(c.Gateway.Host)
+	path := strings.TrimSpace(c.Gateway.ProfilePath)
+	if host == "" || path == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	port := ListenPort(c.Gateway.Listen)
+	if port == 443 {
+		return "https://" + host + path
+	}
+	return fmt.Sprintf("https://%s:%d%s", host, port, path)
+}
+
 // IPv4Preferred 报告是否强制 IPv4 优先（未配置时默认 true）。
 func (c *Config) IPv4Preferred() bool {
 	if c.PreferIPv4 == nil {

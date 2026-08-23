@@ -30,6 +30,7 @@ import (
 
 	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
+	"github.com/kelenetwork/5gpn-next/internal/qrcode"
 	"github.com/kelenetwork/5gpn-next/internal/stats"
 )
 
@@ -1201,18 +1202,48 @@ func (b *Bot) sendDNSProfile(ctx context.Context, v view) {
 		return
 	}
 
-	caption := "<b>iOS 蜂窝 DNS 描述文件</b>\n\n" +
+	profileURL := b.Manager.ProfileDownloadURL()
+	sentQR := false
+	if profileURL != "" {
+		if png, qerr := qrcode.EncodePNG(profileURL); qerr != nil {
+			log.Printf("Bot 生成描述文件二维码失败: %v", qerr)
+		} else {
+			qrCaption := "<b>iOS 蜂窝 DNS 描述文件</b>\n\n" +
+				"<b>方式一：扫码安装</b>\n" +
+				"1. 如已安装旧版 5gpn 描述文件，请先删除\n" +
+				"2. 手机走<b>内网卡蜂窝数据</b>，用相机或 Safari 扫码\n" +
+				"3. 打开 设置 → 通用 → VPN 与设备管理并安装\n\n" +
+				"<b>方式二：点击下方文件下载</b>\n\n" +
+				"链接：<code>" + html.EscapeString(profileURL) + "</code>\n\n" +
+				"<i>✅ 仅蜂窝数据生效，Wi-Fi 完全不受影响；国内 IP 手机本地直连。\n" +
+				"⚠️ 链接含随机串，请勿外传；仅内网卡来源可访问。</i>"
+			if err := b.sendPhoto(ctx, v.chatID, "5gpn-next-dns.png", png, qrCaption); err != nil {
+				log.Printf("Bot 发送描述文件二维码失败: %v", err)
+			} else {
+				sentQR = true
+			}
+		}
+	}
+
+	docCaption := "<b>iOS 蜂窝 DNS 描述文件</b>\n\n" +
 		"1. 如已安装旧版 5gpn 描述文件，请先删除\n" +
 		"2. 点击上方文件并选择下载\n" +
 		"3. 打开 设置 → 通用 → VPN 与设备管理并安装\n\n" +
 		"<i>✅ 仅蜂窝数据生效，Wi-Fi 完全不受影响；国内 IP 手机本地直连。\n" +
 		"⚠️ 加密 DNS 无法识别少数无 SNI 私有协议，这是当前方案的明确边界。</i>"
+	if sentQR {
+		docCaption = "<b>描述文件</b>\n\n也可直接点开这个文件下载安装。"
+	}
 
-	if err := b.sendDocument(ctx, v.chatID, "5gpn-next-dns.mobileconfig", data, caption); err != nil {
+	if err := b.sendDocument(ctx, v.chatID, "5gpn-next-dns.mobileconfig", data, docCaption); err != nil {
 		b.render(ctx, v, errBox("发送失败", err), backTo("client"))
 		return
 	}
-	b.render(ctx, v, "<b>客户端接入</b>\n\n蜂窝 DNS 描述文件已发送，请查看上方文件。",
+	done := "<b>客户端接入</b>\n\n蜂窝 DNS 描述文件已发送，请查看上方文件。"
+	if sentQR {
+		done = "<b>客户端接入</b>\n\n二维码与描述文件都已发送。\n扫码或点开文件都可以安装。"
+	}
+	b.render(ctx, v, done,
 		inlineKeyboard(
 			[]btn{{"重新获取", "ios_dns_profile"}},
 			[]btn{{"返回主菜单", "menu"}},
@@ -1237,6 +1268,46 @@ func (b *Bot) sendDocument(ctx context.Context, chatID int64, filename string, d
 	}
 
 	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", b.Token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var r struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(body, &r)
+	if !r.OK {
+		return fmt.Errorf("telegram: %s", r.Description)
+	}
+	return nil
+}
+
+func (b *Bot) sendPhoto(ctx context.Context, chatID int64, filename string, data []byte, caption string) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	_ = mw.WriteField("caption", caption)
+	_ = mw.WriteField("parse_mode", "HTML")
+	fw, err := mw.CreateFormFile("photo", filename)
+	if err != nil {
+		return err
+	}
+	if _, err := fw.Write(data); err != nil {
+		return err
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", b.Token)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
 	if err != nil {
 		return err

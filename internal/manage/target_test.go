@@ -30,3 +30,23 @@ func TestDisplayOfDirectUsesKFCName(t *testing.T) {
 		t.Fatalf("displayOf(DIRECT)=%q, want %q", got, want)
 	}
 }
+
+func TestProfileDownloadURLFromManager(t *testing.T) {
+	c := config.Default()
+	c.Gateway.Host = "kfc.example.com"
+	c.Gateway.Listen = ":20443"
+	c.Gateway.ProfilePath = "/dl/aabbccddeeff/5gpn-next.mobileconfig"
+	c.DNS.Enabled = true
+	m := New("/tmp/unused.json", c, nil, nil)
+	want := "https://kfc.example.com:20443/dl/aabbccddeeff/5gpn-next.mobileconfig"
+	if got := m.ProfileDownloadURL(); got != want {
+		t.Fatalf("url=%q, want %q", got, want)
+	}
+	c.DNS.Enabled = false
+	if m.ProfileDownloadURL() != "" {
+		t.Fatal("disabled dns must hide profile url")
+	}
+	if (*Manager)(nil).ProfileDownloadURL() != "" {
+		t.Fatal("nil manager must hide profile url")
+	}
+}
