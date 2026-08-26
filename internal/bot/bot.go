@@ -539,8 +539,20 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 			b.render(ctx, v, errBox("切换失败", err), backTo("egress"))
 			return
 		}
-		b.showEgress(ctx, v)
+		b.showEgressInfo(ctx, v, name)
 
+	case strings.HasPrefix(cmd, "egress_info:"):
+		b.showEgressInfo(ctx, v, strings.TrimPrefix(cmd, "egress_info:"))
+	case strings.HasPrefix(cmd, "del_egress_ask:"):
+		name := strings.TrimPrefix(cmd, "del_egress_ask:")
+		b.render(ctx, v, fmt.Sprintf(
+			"🗑 <b>确认删除出口</b> · <code>%s</code>\n\n"+
+				"将停止其代理实例并从列表移除；若为当前兜底出口，自动回落 KFC 本机出口。\n\n<b>此操作不可撤销。</b>",
+			html.EscapeString(name)),
+			inlineKeyboard(
+				[]btn{{"⚠️ 确认删除", "del_egress:" + name}},
+				[]btn{{"« 取消", "egress_info:" + name}},
+			))
 	case strings.HasPrefix(cmd, "rename_egress:"):
 		name := strings.TrimPrefix(cmd, "rename_egress:")
 		b.ask(ctx, v, "egress_rename|"+name,
@@ -826,13 +838,22 @@ func (b *Bot) showTraffic(ctx context.Context, v view) {
 
 func (b *Bot) showEgress(ctx context.Context, v view) {
 	st := b.Manager.Status(b.Version)
+	h, hasHealth := b.Manager.HealthReport()
+	probe := map[string]string{}
+	if hasHealth {
+		for _, e := range h.Egress {
+			if e.Probe1h.Count == 0 {
+				continue
+			}
+			probe[e.Name] = fmt.Sprintf("%s %dms", rateIcon(e.Probe1h.FailRate()), e.Probe1h.AvgMS)
+		}
+	}
 
 	var sb strings.Builder
-	sb.WriteString("🌐 <b>国外默认出口</b>\n")
+	fmt.Fprintf(&sb, "%s <b>国外默认出口</b>\n", em("🌏"))
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString("<i>只决定国外未命中流量：KFC 本机出口表示使用 KFC 公网 IP；国内常用域名由描述文件在手机侧直连，其余域名解析 IP 后由 GEOIP 兜底。自定义规则始终优先。</i>\n\n")
 	if !st.DomesticReady {
-		sb.WriteString("⚠️ <b>国内直连规则尚未就绪</b>\n<blockquote>为防止退化成国内外全局代理，当前运行态已安全回落 KFC 本机出口；切换代理出口时会先刷新规则。</blockquote>\n")
+		sb.WriteString("⚠️ <b>国内直连规则尚未就绪</b>\n<blockquote>为防止退化成国内外全局代理，当前运行态已安全回落 KFC 本机出口；切换代理出口时会先刷新规则。</blockquote>\n\n")
 	}
 
 	var rows [][]btn
@@ -845,25 +866,89 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 		if disp == "" {
 			disp = e.Name
 		}
-		fmt.Fprintf(&sb, "%s <b>%s</b>  <i>%s</i>\n", mark, html.EscapeString(disp), e.Type)
-		if e.Server != "" {
-			fmt.Fprintf(&sb, "   <code>%s</code>\n", html.EscapeString(e.Server))
+		line := fmt.Sprintf("%s <b>%s</b> · <i>%s</i>", mark, html.EscapeString(disp), e.Type)
+		if p, ok := probe[e.Name]; ok {
+			line += " · " + p
 		}
+		sb.WriteString(line + "\n")
 
-		short := truncateText(disp, 12)
-		row := []btn{{"🧪 测 " + short, "test_egress:" + e.Name}}
-		if !e.Current {
-			row = append([]btn{{"国外走 " + short, "switch:" + e.Name}}, row...)
-		}
-		if e.Name != "DIRECT" {
-			row = append(row, btn{"🗑", "del_egress:" + e.Name})
-		}
-		rows = append(rows, row)
+		rows = append(rows, []btn{{mark + " " + truncateText(disp, 16), "egress_info:" + e.Name}})
 	}
-	sb.WriteString("\n<i>● 仅表示国外兜底出口。删除当前出口会自动回落 KFC 本机出口。</i>")
+	sb.WriteString("\n<i>● 为当前国外兜底出口。点节点名进入管理。</i>")
 
 	rows = append(rows, []btn{{"➕ 添加出口", "ask_egress_add"}})
 	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+// showEgressInfo 是单出口详情页：状态、地址、探测统计与全部操作。
+func (b *Bot) showEgressInfo(ctx context.Context, v view, name string) {
+	st := b.Manager.Status(b.Version)
+	var eg *manage.EgressStatus
+	for i := range st.Egress {
+		if st.Egress[i].Name == name {
+			eg = &st.Egress[i]
+			break
+		}
+	}
+	if eg == nil {
+		b.showEgress(ctx, v)
+		return
+	}
+	disp := eg.Display
+	if disp == "" {
+		disp = eg.Name
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s <b>%s</b>\n", em("🌏"), html.EscapeString(disp))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	if eg.Current {
+		sb.WriteString("● <b>当前国外兜底出口</b>\n")
+	}
+	fmt.Fprintf(&sb, "协议　<i>%s</i>\n", html.EscapeString(eg.Type))
+	if eg.Server != "" {
+		fmt.Fprintf(&sb, "服务器　<code>%s</code>\n", html.EscapeString(eg.Server))
+	}
+	v6 := "✗"
+	if eg.HasIPv6 {
+		v6 = "✓"
+	}
+	fmt.Fprintf(&sb, "IPv6 代拨　<b>%s</b>\n", v6)
+
+	if h, ok := b.Manager.HealthReport(); ok {
+		for _, e := range h.Egress {
+			if e.Name != name {
+				continue
+			}
+			if e.Probe1h.Count > 0 {
+				fmt.Fprintf(&sb, "\n<b>近 1 小时</b>\n<blockquote>%s 探测 均 <b>%dms</b> · p95 <b>%dms</b> · 失败 <b>%d</b>/%d",
+					rateIcon(e.Probe1h.FailRate()), e.Probe1h.AvgMS, e.Probe1h.P95MS, e.Probe1h.Fail, e.Probe1h.Count)
+				if e.Fw1h.Count > 0 {
+					fmt.Fprintf(&sb, "\n转发 <b>%d</b> 次 · 失败 <b>%d</b>", e.Fw1h.Count, e.Fw1h.Fail)
+				}
+				if e.UpBytes > 0 || e.DownBytes > 0 {
+					fmt.Fprintf(&sb, "\n流量 ↑ <b>%s</b> · ↓ <b>%s</b>", humanBytes(e.UpBytes), humanBytes(e.DownBytes))
+				}
+				sb.WriteString("</blockquote>")
+			}
+			break
+		}
+	}
+
+	var rows [][]btn
+	if !eg.Current {
+		rows = append(rows, []btn{{"🌏 设为国外兜底出口", "switch:" + eg.Name}})
+	}
+	row := []btn{{"🧪 测试连通", "test_egress:" + eg.Name}}
+	if eg.Name != "DIRECT" {
+		row = append(row, btn{"✏️ 改名", "rename_egress:" + eg.Name})
+	}
+	rows = append(rows, row)
+	if eg.Name != "DIRECT" {
+		rows = append(rows, []btn{{"🗑 删除此出口", "del_egress_ask:" + eg.Name}})
+	}
+	rows = append(rows, []btn{{"« 返回出口列表", "egress"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
@@ -877,7 +962,7 @@ func (b *Bot) doTestEgress(ctx context.Context, v view, name string) {
 			html.EscapeString(name), html.EscapeString(err.Error())),
 			inlineKeyboard(
 				[]btn{{"🔁 再测一次", "test_egress:" + name}},
-				[]btn{{"« 返回出口", "egress"}},
+				[]btn{{"« 返回节点", "egress_info:" + name}},
 			))
 		return
 	}
@@ -886,7 +971,7 @@ func (b *Bot) doTestEgress(ctx context.Context, v view, name string) {
 		html.EscapeString(name), d.Milliseconds()),
 		inlineKeyboard(
 			[]btn{{"🔁 再测一次", "test_egress:" + name}},
-			[]btn{{"« 返回出口", "egress"}},
+			[]btn{{"« 返回节点", "egress_info:" + name}},
 		))
 }
 
