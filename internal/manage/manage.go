@@ -465,6 +465,30 @@ func verifyEgress(addr string, total time.Duration) error {
 	}
 }
 
+// RenameEgress 修改出口显示名。只动 DisplayName，不碰内部名/unit/目录，
+// 因此零风险、即时生效；分流规则引用的内部名保持稳定。
+func (m *Manager) RenameEgress(name, newDisplay string) error {
+	newDisplay = strings.TrimSpace(newDisplay)
+	if newDisplay == "" {
+		return fmt.Errorf("名称不能为空")
+	}
+	if len([]rune(newDisplay)) > 24 {
+		return fmt.Errorf("名称过长（24 字符内）")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.Cfg.Egress {
+		if m.Cfg.Egress[i].Name == name {
+			if m.Cfg.Egress[i].Type == "direct" {
+				return fmt.Errorf("本机直出出口不支持改名")
+			}
+			m.Cfg.Egress[i].DisplayName = newDisplay
+			return m.Cfg.Save(m.ConfigPath)
+		}
+	}
+	return fmt.Errorf("出口 %q 不存在", name)
+}
+
 // RemoveEgress 删除出口。
 func (m *Manager) RemoveEgress(name string) error {
 	if name == "DIRECT" {

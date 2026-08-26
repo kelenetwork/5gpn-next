@@ -735,20 +735,30 @@ func cmdRun(args []string) error {
 		if r, ok := update.ConsumeLastResult(); ok {
 			go func() {
 				time.Sleep(2 * time.Second)
+				var text string
 				switch r.Status {
 				case "success":
-					tb.Notify(botCtx, fmt.Sprintf(
+					text = fmt.Sprintf(
 						"🎉 <b>升级完成</b>\n\n<code>%s</code> → <code>%s</code>\n新版本已通过健康检查，正在运行。",
-						r.From, r.To))
+						r.From, r.To)
 				case "rolled_back":
-					tb.Notify(botCtx, fmt.Sprintf(
+					text = fmt.Sprintf(
 						"↩️ <b>升级已回退</b>\n\n<code>%s</code> 启动失败，已自动回退到 <code>%s</code> 并恢复运行。",
-						r.To, r.From))
+						r.To, r.From)
 				default:
-					tb.Notify(botCtx, fmt.Sprintf(
+					text = fmt.Sprintf(
 						"⚠️ <b>升级异常</b>（%s）\n\n目标 <code>%s</code>，当前运行 <code>%s</code>，请检查服务状态。",
-						r.Status, r.To, version))
+						r.Status, r.To, version)
 				}
+				// 单消息升级链路：优先就地编辑升级前的进度消息，
+				// 整个升级从点击到最终结果只占一条消息；没有目标
+				// （手动重启、目标丢失）时退回推送新消息。
+				if t, ok := update.ConsumeNotifyTarget(); ok {
+					tb.EditMessage(botCtx, t.ChatID, t.MsgID, text,
+						`{"inline_keyboard":[[{"text":"🏠 主菜单","callback_data":"menu"}]]}`)
+					return
+				}
+				tb.Notify(botCtx, text)
 			}()
 		} else if markStartupNotified(version) {
 			// 启动通知只在版本变化时发一次：

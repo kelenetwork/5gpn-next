@@ -127,3 +127,36 @@ func (m *Manager) Backups() []BackupInfo {
 	}
 	return out
 }
+
+// notifyTargetFile 记录升级前进度消息的位置：重启后新进程编辑同一条
+// 消息展示最终结果，而不是另发一条，保证整个升级链路只有一条消息。
+const notifyTargetFile = stateDir + "/update-notify-target.json"
+
+// NotifyTarget 是升级结果要编辑的目标消息。
+type NotifyTarget struct {
+	ChatID int64 `json:"chat_id"`
+	MsgID  int64 `json:"msg_id"`
+}
+
+// SaveNotifyTarget 持久化进度消息位置；失败静默（最坏退化为新发一条）。
+func SaveNotifyTarget(chatID, msgID int64) {
+	b, err := json.Marshal(NotifyTarget{ChatID: chatID, MsgID: msgID})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(notifyTargetFile, b, 0o600)
+}
+
+// ConsumeNotifyTarget 消费式读取目标消息位置。
+func ConsumeNotifyTarget() (NotifyTarget, bool) {
+	b, err := os.ReadFile(notifyTargetFile)
+	if err != nil {
+		return NotifyTarget{}, false
+	}
+	_ = os.Remove(notifyTargetFile)
+	var t NotifyTarget
+	if err := json.Unmarshal(b, &t); err != nil || t.ChatID == 0 {
+		return NotifyTarget{}, false
+	}
+	return t, true
+}

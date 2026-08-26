@@ -32,6 +32,7 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/manage"
 	"github.com/kelenetwork/5gpn-next/internal/qrcode"
 	"github.com/kelenetwork/5gpn-next/internal/stats"
+	updatepkg "github.com/kelenetwork/5gpn-next/internal/update"
 )
 
 // Bot 是 Telegram 管理机器人。
@@ -450,15 +451,12 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showMenu(ctx, v)
 
 	case cmd == "ask_egress_add":
-		b.ask(ctx, v, "egress_add",
-			"➕ <b>添加出口</b>\n\n"+
-				"发送 <code>名称 链接</code> 可自定义出口名（推荐），\n"+
-				"例如：<code>东京家宽 ss://xxxx</code>\n"+
-				"之后分流规则、出口列表、监控都以这个名字显示。\n\n"+
-				"也可以只粘贴链接，将使用节点自带备注名。\n\n"+
-				"支持：<code>ss</code> <code>vless</code> <code>vmess</code> "+
-				"<code>trojan</code> <code>hysteria2</code> <code>tuic</code> "+
-				"<code>socks5</code> <code>http</code>")
+		b.ask(ctx, v, "egress_add_name",
+			"➕ <b>添加出口</b> · 第 1 步\n\n"+
+				"给这个出口起个名字（支持中文/emoji），\n"+
+				"例如：<code>东京家宽</code>\n"+
+				"之后出口列表、分流、监控都以这个名字显示。\n\n"+
+				"<i>直接粘贴节点链接可跳过命名，使用节点自带备注名。</i>")
 	case cmd == "ask_rule_add":
 		b.askRuleAdd(ctx, v)
 	case cmd == "ask_probe":
@@ -543,6 +541,12 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		}
 		b.showEgress(ctx, v)
 
+	case strings.HasPrefix(cmd, "rename_egress:"):
+		name := strings.TrimPrefix(cmd, "rename_egress:")
+		b.ask(ctx, v, "egress_rename|"+name,
+			fmt.Sprintf("✏️ <b>重命名出口</b> · <code>%s</code>\n\n"+
+				"发送新的显示名称（支持中文/emoji，24 字符内）。\n"+
+				"出口列表、分流、监控将统一显示新名字。", html.EscapeString(name)))
 	case strings.HasPrefix(cmd, "del_egress:"):
 		name := strings.TrimPrefix(cmd, "del_egress:")
 		if err := b.Manager.RemoveEgress(name); err != nil {
@@ -577,20 +581,38 @@ func (b *Bot) ask(ctx context.Context, v view, action, prompt string) {
 }
 
 func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
-	switch action {
-	case "egress_add":
-		// 支持「名称 链接」：首段不含 :// 时视为自定义名称。
-		name, link := "", strings.TrimSpace(text)
-		if i := strings.IndexAny(link, " \t\n"); i > 0 && !strings.Contains(link[:i], "://") {
-			name, link = strings.TrimSpace(link[:i]), strings.TrimSpace(link[i+1:])
-		}
-		msg, err := b.Manager.AddEgress(name, link)
-		if err != nil {
-			b.render(ctx, v, errBox("添加失败", err), backTo("egress"))
+	// 带参数的动作：动作串以 | 携带上一步输入。
+	if name, ok := strings.CutPrefix(action, "egress_add_link|"); ok {
+		b.doEgressAdd(ctx, v, name, strings.TrimSpace(text))
+		return
+	}
+	if name, ok := strings.CutPrefix(action, "egress_rename|"); ok {
+		if err := b.Manager.RenameEgress(name, strings.TrimSpace(text)); err != nil {
+			b.render(ctx, v, errBox("改名失败", err), backTo("egress"))
 			return
 		}
-		b.render(ctx, v, "✅ <b>已添加出口</b>\n\n"+html.EscapeString(msg),
-			inlineKeyboard([]btn{{"🌐 查看出口", "egress"}}, []btn{{"« 返回主菜单", "menu"}}))
+		b.showEgress(ctx, v)
+		return
+	}
+	switch action {
+	case "egress_add_name":
+		in := strings.TrimSpace(text)
+		if strings.Contains(in, "://") {
+			// 用户直接给了链接：跳过命名，走节点备注名。
+			b.doEgressAdd(ctx, v, "", in)
+			return
+		}
+		if len([]rune(in)) > 24 {
+			b.render(ctx, v, errBox("名称过长", fmt.Errorf("请控制在 24 个字符以内")), backTo("egress"))
+			return
+		}
+		b.ask(ctx, v, "egress_add_link|"+in,
+			fmt.Sprintf("➕ <b>添加出口</b> · 第 2 步\n\n"+
+				"名称：<b>%s</b>\n\n"+
+				"现在粘贴节点分享链接。\n\n"+
+				"支持：<code>ss</code> <code>vless</code> <code>vmess</code> "+
+				"<code>trojan</code> <code>hysteria2</code> <code>tuic</code> "+
+				"<code>socks5</code> <code>http</code>", html.EscapeString(in)))
 
 	case "rule_add":
 		if err := b.Manager.AddRule(text); err != nil {
@@ -1406,12 +1428,22 @@ func (b *Bot) doUpdateApply(ctx context.Context, v view, tag string) {
 	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	msg, err := b.Manager.ApplyUpdate(cctx, tag)
+	_, err := b.Manager.ApplyUpdate(cctx, tag)
 	if err != nil {
 		b.render(ctx, v, errBox("升级失败", err), backTo("update"))
 		return
 	}
-	b.render(ctx, v, fmt.Sprintf("%s <b>升级任务已启动</b>\n\n%s", em("✅"), html.EscapeString(msg)), backTo("menu"))
+	// 全部准备阶段完成：同一条消息收尾为「重启生效中」。重启后新进程
+	// 会继续编辑这条消息写入最终结果——整个升级链路只占一条消息。
+	id := b.render(ctx, v, renderUpdateProgress(tag, "restart"), "")
+	if id != 0 {
+		updatepkg.SaveNotifyTarget(v.chatID, id)
+	}
+}
+
+// EditMessage 编辑指定消息（供升级结果等跨进程场景使用）。
+func (b *Bot) EditMessage(ctx context.Context, chatID, msgID int64, text, keyboard string) {
+	b.render(ctx, view{chatID: chatID, msgID: msgID}, text, keyboard)
 }
 
 func (b *Bot) showRollback(ctx context.Context, v view) {
@@ -1742,4 +1774,20 @@ func (b *Bot) showUpdateHistory(ctx context.Context, v view) {
 	b.render(ctx, v, sb.String(), inlineKeyboard(
 		[]btn{{"« 返回版本更新", "update"}},
 	))
+}
+
+// doEgressAdd 执行添加出口并渲染结果（引导式两步流程的收口）。
+func (b *Bot) doEgressAdd(ctx context.Context, v view, name, link string) {
+	if link == "" || !strings.Contains(link, "://") {
+		b.render(ctx, v, errBox("链接无效", fmt.Errorf("请粘贴完整的节点分享链接")), backTo("egress"))
+		return
+	}
+	b.render(ctx, v, "⏳ 正在添加出口并验证联通性 …\n\n<i>会真实建立一条出站连接，最长约 12 秒。</i>", "")
+	msg, err := b.Manager.AddEgress(name, link)
+	if err != nil {
+		b.render(ctx, v, errBox("添加失败", err), backTo("egress"))
+		return
+	}
+	b.render(ctx, v, fmt.Sprintf("%s <b>已添加出口</b>\n\n%s", em("✅"), html.EscapeString(msg)),
+		inlineKeyboard([]btn{{"🌐 查看出口", "egress"}}, []btn{{"« 返回主菜单", "menu"}}))
 }
