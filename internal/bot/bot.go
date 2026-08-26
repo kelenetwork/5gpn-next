@@ -219,8 +219,14 @@ func (b *Bot) render(ctx context.Context, v view, text, keyboard string) int64 {
 		}
 		if _, err := b.api(ctx, "editMessageText", p); err == nil {
 			return v.msgID
+		} else if strings.Contains(err.Error(), "message is not modified") {
+			// 内容未变不是失败：消息本来就处于目标状态。若在这里退回
+			// 新发，会克隆出一条永远没人再编辑的僵尸消息（升级进度页
+			// 实测踩坑：初始渲染与第一个阶段回调文本相同，重复发送后
+			// 旧消息永远停在「下载中」）。
+			return v.msgID
 		}
-		// 编辑失败（内容未变、消息过旧等）时退回新发，不让用户卡住
+		// 其它编辑失败（消息过旧、被删除等）时退回新发，不让用户卡住
 	}
 	return b.send(ctx, v.chatID, text, keyboard)
 }
@@ -1335,9 +1341,15 @@ func renderUpdateProgress(tag, current string) string {
 func (b *Bot) doUpdateApply(ctx context.Context, v view, tag string) {
 	b.render(ctx, v, renderUpdateProgress(tag, "download"), "")
 
-	// 阶段回调：每步刷新同一条消息。回调来自升级 goroutine，
+	// 阶段回调：每步就地编辑同一条消息。回调来自升级 goroutine，
 	// 用独立短超时 context，绝不阻塞升级本身。
+	// lastStage 去重：初始渲染已是 download，首个回调不必重复编辑。
+	lastStage := "download"
 	b.Manager.SetUpdateStageHook(func(stage, _ string) {
+		if stage == lastStage {
+			return
+		}
+		lastStage = stage
 		sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 		b.render(sctx, v, renderUpdateProgress(tag, stage), "")
 		scancel()
