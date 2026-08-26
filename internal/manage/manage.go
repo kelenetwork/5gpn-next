@@ -21,6 +21,7 @@ import (
 
 	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/egress"
+	"github.com/kelenetwork/5gpn-next/internal/monitor"
 	"github.com/kelenetwork/5gpn-next/internal/node"
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/probe"
@@ -61,6 +62,9 @@ type Manager struct {
 
 	// AndroidInfo 返回 Android 接入所需信息
 	AndroidInfo func() AndroidGuide
+
+	// Health 是内置健康监控（可为空）
+	Health *monitor.Monitor
 
 	started time.Time
 }
@@ -1063,6 +1067,69 @@ func certNotAfter(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "notAfter="))
+}
+
+// ---------- 健康监控 ----------
+
+// HealthReport 是 Bot 与面板共用的健康快照。
+func (m *Manager) HealthReport() (monitor.Health, bool) {
+	if m.Health == nil {
+		return monitor.Health{}, false
+	}
+	return m.Health.Snapshot(), true
+}
+
+// HealthAnomalies 返回某出口最近异常探测点。
+func (m *Manager) HealthAnomalies(name string, limit int) []monitor.Sample {
+	if m.Health == nil {
+		return nil
+	}
+	return m.Health.Anomalies(name, limit)
+}
+
+// SysHealth 是进程/系统层健康读数。
+type SysHealth struct {
+	MemoryMB   float64
+	Goroutines int
+	Uptime     string
+	CertDays   int // -1 表示未知
+}
+
+// SysHealthNow 返回当前系统读数。
+func (m *Manager) SysHealthNow() SysHealth {
+	m.mu.RLock()
+	cert := ""
+	if m.Cfg != nil {
+		cert = m.Cfg.Gateway.CertFile
+	}
+	started := m.started
+	m.mu.RUnlock()
+	h := SysHealth{
+		MemoryMB:   memoryMB(),
+		Goroutines: runtime.NumGoroutine(),
+		Uptime:     humanDuration(time.Since(started)),
+		CertDays:   certDaysLeft(cert),
+	}
+	return h
+}
+
+// certDaysLeft 返回证书剩余天数；解析失败返回 -1。
+func certDaysLeft(path string) int {
+	if path == "" {
+		return -1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "openssl", "x509", "-enddate", "-noout", "-in", path).Output()
+	if err != nil {
+		return -1
+	}
+	raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "notAfter="))
+	t, err := time.Parse("Jan 2 15:04:05 2006 MST", raw)
+	if err != nil {
+		return -1
+	}
+	return int(time.Until(t).Hours() / 24)
 }
 
 // SortedEgressNames 返回排序后的出口名，便于稳定展示。

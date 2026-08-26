@@ -87,10 +87,21 @@ type Server struct {
 	NoHost  atomic.Int64 // 无法还原目的地而丢弃的会话数
 	Failed  atomic.Int64 // 策略/出口/拨号失败的会话数
 
+	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。
+	OnDial func(egress string, ok bool, ms int64)
+
 	seq atomic.Uint64
 
 	mu       sync.Mutex
 	sessions map[string]*session
+}
+
+// ActiveSessions 返回 (当前会话数, 上限)，供健康监控展示水位。
+func (s *Server) ActiveSessions() (int, int) {
+	s.mu.Lock()
+	n := len(s.sessions)
+	s.mu.Unlock()
+	return n, maxSessions
 }
 
 type session struct {
@@ -339,7 +350,11 @@ func (sc *session) connect(ctx context.Context, pc net.PacketConn, host string) 
 
 	dialCtx, cancel := context.WithTimeout(ctx, egress.DialTimeout)
 	defer cancel()
+	dialStart := time.Now()
 	remote, err := egress.DialUDPVia(dialCtx, d, target)
+	if sc.srv.OnDial != nil {
+		sc.srv.OnDial(d.Name(), err == nil, time.Since(dialStart).Milliseconds())
+	}
 	if err != nil {
 		sc.tr.Fail(trace.StageConnect, err, "QUIC 出口拨号 %s 失败", target)
 		sc.srv.Failed.Add(1)

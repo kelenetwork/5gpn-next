@@ -364,6 +364,10 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showTraffic(ctx, v)
 	case cmd == "egress":
 		b.showEgress(ctx, v)
+	case cmd == "health":
+		b.showHealth(ctx, v)
+	case strings.HasPrefix(cmd, "health_detail:"):
+		b.showHealthDetail(ctx, v, strings.TrimPrefix(cmd, "health_detail:"))
 	case cmd == "rules":
 		b.showRules(ctx, v)
 	case cmd == "adblock":
@@ -543,6 +547,7 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 		[]btn{{"📊 运行状态", "status"}, {"📈 网关转发流量", "traffic"}},
 		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
 		[]btn{{"🛡 广告拦截", "adblock"}, {"🩺 连通诊断", "ask_probe"}},
+		[]btn{{"💓 健康监控", "health"}},
 		[]btn{{"📱 客户端接入", "client"}, {"🖥 内网面板", "panel"}},
 		[]btn{{"🚀 版本更新", "update"}},
 	))

@@ -23,6 +23,7 @@ import (
 	"github.com/kelenetwork/5gpn-next/internal/ingress/quicfwd"
 	"github.com/kelenetwork/5gpn-next/internal/ingress/sniff"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
+	"github.com/kelenetwork/5gpn-next/internal/monitor"
 	"github.com/kelenetwork/5gpn-next/internal/node"
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/probe"
@@ -322,6 +323,20 @@ func cmdRun(args []string) error {
 
 	// 管理层：Bot 与 Web 面板共用同一套动作实现
 	mgr := manage.New(cfgPath, a.cfg, a.engine, a.reg)
+
+	// 健康监控：出口探测 + 真实转发埋点 + DoT 上游耗时。纯观测，
+	// 任何采样失败都不影响数据面。
+	health := monitor.New()
+	health.Targets = func() []monitor.Target {
+		var out []monitor.Target
+		for _, e := range a.cfg.Egress {
+			if e.Server != "" {
+				out = append(out, monitor.Target{Name: e.Name, Addr: e.Server})
+			}
+		}
+		return out
+	}
+	mgr.Health = health
 	// 计数器分散在 sniff（连接级）与 DoT（查询级），用闭包延迟聚合。
 	var sniffSrv *sniff.Server
 	var quicSrv *quicfwd.Server
@@ -529,8 +544,10 @@ func cmdRun(args []string) error {
 			OnTraffic:  traffic.Traffic,
 			HintLookup: hints.Lookup,
 			ClientCIDR: clientPfx,
+			OnDial:     health.RecordForward,
 		}
 		sniffSrv = sn
+		health.SniffActive = sn.ActiveConns
 		go func() {
 			if e := sn.ListenAndServe(ingressCtx, a.cfg.DNS.TLSListen, true); e != nil {
 				log.Printf("加密 DNS TLS 接管入口退出: %v", e)
@@ -554,6 +571,7 @@ func cmdRun(args []string) error {
 			OnDecision: func(_ string, action string) {
 				dnsStats.record(action)
 			},
+			OnUpstream: health.RecordDNS,
 			OnResponse: func(qname, action string) {
 				// 内置 DoH 阻断是链路修复，不计入广告拦截统计。
 				if action == "block" && !config.IsBuiltinDoHBlocked(qname) {
@@ -579,8 +597,10 @@ func cmdRun(args []string) error {
 				OnTraffic:  traffic.Traffic,
 				HintLookup: hints.Lookup,
 				ClientCIDR: clientPfx,
+				OnDial:     health.RecordForward,
 			}
 			quicSrv = qs
+			health.QUICActive = qs.ActiveSessions
 			// 先放行防火墙再起监听：顺序反了会有一小段时间客户端收到
 			// 拒绝而放弃 QUIC。放行失败不致命，服务照常降级运行。
 			fwCtx, fwCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -626,11 +646,19 @@ func cmdRun(args []string) error {
 		}
 	}
 
+	// 健康监控探测循环：随 ingress 生命周期一起停。
+	go health.Run(ingressCtx)
+
 	// Telegram Bot
 	botCtx, botCancel := context.WithCancel(context.Background())
 	defer botCancel()
 	if a.cfg.Bot.Token != "" && len(a.cfg.Bot.Admins) > 0 {
 		tb := bot.New(a.cfg.Bot.Token, a.cfg.Bot.Admins, mgr, version)
+		health.Notify = func(text string) {
+			nctx, ncancel := context.WithTimeout(botCtx, 30*time.Second)
+			tb.Notify(nctx, text)
+			ncancel()
+		}
 		if panelHandler != nil {
 			tb.PanelURL = fmt.Sprintf("https://%s:%d/",
 				a.cfg.Gateway.Host, portOf(a.cfg.Gateway.Listen))

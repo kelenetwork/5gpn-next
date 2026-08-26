@@ -54,6 +54,10 @@ type Server struct {
 	// 供 sniff 在无 SNI 协议上做“DNS 线索回退”还原目的地（可为空）。
 	OnRewrite func(client, qname string)
 
+	// OnUpstream 在每次真实上游查询完成后回调（可为空），供健康监控
+	// 统计上游耗时与超时率；缓存命中不计入。
+	OnUpstream func(ok bool, ms int64)
+
 	client   *dns.Client
 	cacheMu  sync.RWMutex
 	cache    map[string]cacheEntry
@@ -316,12 +320,19 @@ func answerAddrs(resp *dns.Msg) []netip.Addr {
 // query 依次尝试上游，返回首个成功结果。
 func (s *Server) query(req *dns.Msg) (*dns.Msg, error) {
 	var lastErr error
+	start := time.Now()
 	for _, up := range s.Upstream {
 		resp, _, err := s.client.Exchange(req.Copy(), up)
 		if err == nil && resp != nil {
+			if s.OnUpstream != nil {
+				s.OnUpstream(true, time.Since(start).Milliseconds())
+			}
 			return resp, nil
 		}
 		lastErr = err
+	}
+	if s.OnUpstream != nil {
+		s.OnUpstream(false, time.Since(start).Milliseconds())
 	}
 	return nil, lastErr
 }

@@ -72,6 +72,9 @@ type Server struct {
 	// 避免宿主 INPUT 默认放行时退化成公网开放代理。
 	ClientCIDR netip.Prefix
 
+	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。
+	OnDial func(egress string, ok bool, ms int64)
+
 	Handled atomic.Int64
 	Failed  atomic.Int64
 	NoHost  atomic.Int64
@@ -101,6 +104,12 @@ func (s *Server) release() {
 	case <-s.sem:
 	default:
 	}
+}
+
+// ActiveConns 返回 (当前并发连接数, 上限)，供健康监控展示水位。
+func (s *Server) ActiveConns() (int, int) {
+	s.semOnce.Do(func() { s.sem = make(chan struct{}, maxConns) })
+	return len(s.sem), maxConns
 }
 
 func (s *Server) allowedClient(a net.Addr) bool {
@@ -249,7 +258,11 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 
 	dctx, cancel := context.WithTimeout(ctx, egress.DialTimeout)
 	defer cancel()
+	dialStart := time.Now()
 	up, err := dialer.DialContext(dctx, "tcp", target)
+	if s.OnDial != nil {
+		s.OnDial(dialer.Name(), err == nil, time.Since(dialStart).Milliseconds())
+	}
 	if err != nil {
 		s.Failed.Add(1)
 		tr.Fail(trace.StageConnect, err, "拨号 %s 失败", target)
