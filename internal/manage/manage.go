@@ -228,7 +228,14 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if name == "" {
+	// 用户命名优先：展示名逐字保留（可含中文/emoji），内部名取其
+	// 可安全用于 systemd unit / 目录 / 规则引用的 sanitize 结果。
+	userName := strings.TrimSpace(name)
+	display := strings.TrimSpace(n.Name)
+	if userName != "" {
+		display = userName
+		name = sanitizeName(userName)
+	} else {
 		name = sanitizeName(n.Name)
 	}
 	if name == "" || name == "DIRECT" {
@@ -299,7 +306,7 @@ func (m *Manager) AddEgress(name, link string) (string, error) {
 		Name: name, Type: "socks5",
 		Addr:        addr,
 		HasIPv6:     hasV6,
-		DisplayName: strings.TrimSpace(n.Name),
+		DisplayName: display,
 		Proto:       n.Type,
 		Server:      fmt.Sprintf("%s:%d", n.Server, n.Port),
 	})

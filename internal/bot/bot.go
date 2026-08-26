@@ -54,6 +54,10 @@ type Bot struct {
 	promptMsg map[int64]int64
 	// greeted 标记已经打过招呼的管理员，避免重复补发欢迎语
 	greeted map[int64]bool
+	// lastScreen 记录每个会话当前的「屏幕」消息 ID。用户反复 /start
+	// 或命令新开一屏时，删掉旧屏，保证聊天里始终只有一个活动菜单，
+	// 不堆叠僵尸界面。
+	lastScreen map[int64]int64
 	// pendingGreet 为 true 时表示启动通知没送达，等用户首次交互再补
 	pendingGreet bool
 }
@@ -74,7 +78,8 @@ func New(token string, admins []int64, m *manage.Manager, version string) *Bot {
 		Version:   version,
 		client:    &http.Client{Timeout: 70 * time.Second},
 		pending:   make(map[int64]string),
-		promptMsg: make(map[int64]int64),
+		promptMsg:  make(map[int64]int64),
+		lastScreen: make(map[int64]int64),
 		greeted:   make(map[int64]bool),
 	}
 	if raw, err := os.ReadFile(offsetFile); err == nil {
@@ -228,7 +233,39 @@ func (b *Bot) render(ctx context.Context, v view, text, keyboard string) int64 {
 		}
 		// 其它编辑失败（消息过旧、被删除等）时退回新发，不让用户卡住
 	}
-	return b.send(ctx, v.chatID, text, keyboard)
+	id := b.send(ctx, v.chatID, text, keyboard)
+	if id != 0 {
+		// 新开一屏成功：删除上一屏，聊天里只保留一个活动界面。
+		b.mu.Lock()
+		old := b.lastScreen[v.chatID]
+		b.lastScreen[v.chatID] = id
+		b.mu.Unlock()
+		if old != 0 && old != id {
+			b.deleteMessage(ctx, v.chatID, old)
+		}
+	}
+	return id
+}
+
+// deleteMessage 尽力删除消息；失败（过旧、已删）静默忽略。
+func (b *Bot) deleteMessage(ctx context.Context, chatID, msgID int64) {
+	p := url.Values{}
+	p.Set("chat_id", strconv.FormatInt(chatID, 10))
+	p.Set("message_id", strconv.FormatInt(msgID, 10))
+	_, _ = b.api(ctx, "deleteMessage", p)
+}
+
+// sendEphemeral 发送一条定时自毁的瞬态消息（提示、确认类）。
+func (b *Bot) sendEphemeral(ctx context.Context, chatID int64, text string, ttl time.Duration) {
+	id := b.send(ctx, chatID, text, "")
+	if id == 0 {
+		return
+	}
+	time.AfterFunc(ttl, func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		b.deleteMessage(dctx, chatID, id)
+	})
 }
 
 // send 新发一条消息，返回消息 ID。
@@ -353,11 +390,12 @@ func (b *Bot) maybeGreet(ctx context.Context, chatID int64) {
 	if !need {
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf(
+	// 瞬态提示：60 秒后自毁，不在聊天里留痕。
+	b.sendEphemeral(ctx, chatID, fmt.Sprintf(
 		"✅ <b>5gpn-NEXT 已就绪</b>\n\n"+
 			"版本  <code>%s</code>\n"+
 			"服务已在运行，随时可以开始配置。",
-		html.EscapeString(b.Version)), "")
+		html.EscapeString(b.Version)), 60*time.Second)
 }
 
 func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
@@ -414,7 +452,10 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 	case cmd == "ask_egress_add":
 		b.ask(ctx, v, "egress_add",
 			"➕ <b>添加出口</b>\n\n"+
-				"请粘贴节点分享链接。\n\n"+
+				"发送 <code>名称 链接</code> 可自定义出口名（推荐），\n"+
+				"例如：<code>东京家宽 ss://xxxx</code>\n"+
+				"之后分流规则、出口列表、监控都以这个名字显示。\n\n"+
+				"也可以只粘贴链接，将使用节点自带备注名。\n\n"+
 				"支持：<code>ss</code> <code>vless</code> <code>vmess</code> "+
 				"<code>trojan</code> <code>hysteria2</code> <code>tuic</code> "+
 				"<code>socks5</code> <code>http</code>")
@@ -538,7 +579,12 @@ func (b *Bot) ask(ctx context.Context, v view, action, prompt string) {
 func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 	switch action {
 	case "egress_add":
-		msg, err := b.Manager.AddEgress("", text)
+		// 支持「名称 链接」：首段不含 :// 时视为自定义名称。
+		name, link := "", strings.TrimSpace(text)
+		if i := strings.IndexAny(link, " \t\n"); i > 0 && !strings.Contains(link[:i], "://") {
+			name, link = strings.TrimSpace(link[:i]), strings.TrimSpace(link[i+1:])
+		}
+		msg, err := b.Manager.AddEgress(name, link)
 		if err != nil {
 			b.render(ctx, v, errBox("添加失败", err), backTo("egress"))
 			return
