@@ -82,6 +82,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/rules", p.apiGuard(p.apiRules))
 	mux.HandleFunc("/api/egress", p.apiGuard(p.apiEgress))
 	mux.HandleFunc("/api/probe", p.apiGuard(p.apiProbe))
+	mux.HandleFunc("/api/health", p.apiGuard(p.apiHealth))
 
 	return mux
 }
@@ -200,6 +201,51 @@ func (p *Panel) serveAsset(name, ctype string) http.HandlerFunc {
 
 func (p *Panel) apiStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p.Manager.Status(p.Version))
+}
+
+func (p *Panel) apiHealth(w http.ResponseWriter, r *http.Request) {
+	h, ok := p.Manager.HealthReport()
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	sys := p.Manager.SysHealthNow()
+	type win struct {
+		Count int   `json:"count"`
+		Fail  int   `json:"fail"`
+		AvgMS int64 `json:"avg_ms"`
+		P95MS int64 `json:"p95_ms"`
+	}
+	type eg struct {
+		Name    string `json:"name"`
+		Probe1h win    `json:"probe_1h"`
+		Fw1h    win    `json:"fw_1h"`
+		Up      int64  `json:"up_bytes"`
+		Down    int64  `json:"down_bytes"`
+	}
+	var egs []eg
+	for _, e := range h.Egress {
+		egs = append(egs, eg{
+			Name:    e.Name,
+			Probe1h: win{e.Probe1h.Count, e.Probe1h.Fail, e.Probe1h.AvgMS, e.Probe1h.P95MS},
+			Fw1h:    win{e.Fw1h.Count, e.Fw1h.Fail, e.Fw1h.AvgMS, e.Fw1h.P95MS},
+			Up:      e.UpBytes,
+			Down:    e.DownBytes,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": true,
+		"egress":  egs,
+		"dns_1h":  win{h.DNS1h.Count, h.DNS1h.Fail, h.DNS1h.AvgMS, h.DNS1h.P95MS},
+		"tcp":     map[string]int{"active": h.TCPActive, "max": h.TCPMax},
+		"quic":    map[string]int{"active": h.QUICActive, "max": h.QUICMax},
+		"sys": map[string]any{
+			"memory_mb":  sys.MemoryMB,
+			"goroutines": sys.Goroutines,
+			"uptime":     sys.Uptime,
+			"cert_days":  sys.CertDays,
+		},
+	})
 }
 
 func (p *Panel) apiAdBlock(w http.ResponseWriter, r *http.Request) {

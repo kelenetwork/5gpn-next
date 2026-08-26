@@ -13,7 +13,6 @@ package monitor
 import (
 	"context"
 	"fmt"
-	"net"
 	"sort"
 	"sync"
 	"time"
@@ -30,17 +29,24 @@ const (
 	fwCap    = 1024 // 真实转发结果，按次数保留
 	dnsCap   = 2048 // DoT 上游查询结果
 
-	// alertAfter 是连续失败多少次后告警。首次失败可能只是单点抖动，
-	// 连续三个周期（3 分钟）失败才值得打扰人。
-	alertAfter = 3
-	// alertCooldown 限制同一出口的告警频率。
-	alertCooldown = 30 * time.Minute
+	// DefaultAlertAfter 是连续失败多少次后告警的默认值。首次失败可能
+	// 只是单点抖动，连续三个周期（3 分钟）失败才值得打扰人。
+	DefaultAlertAfter = 3
+	// DefaultAlertCooldown 是同一出口告警频率的默认下限。
+	DefaultAlertCooldown = 30 * time.Minute
+
+	// SaveInterval 是聚合快照落盘周期。升级/重启恰恰是最想回看历史的
+	// 时刻，纯内存缓冲一重启就清零；周期落盘让数据跨重启存活。
+	SaveInterval = 10 * time.Minute
 )
 
 // Target 是一个可探测的出口端点。
 type Target struct {
 	Name string
 	Addr string // host:port
+	// Socks5 为 true 时探测做真实 SOCKS5 版本协商而不止 TCP 建连，
+	// 更接近用户流量的真实可用性。
+	Socks5 bool
 }
 
 // Sample 是一次采样结果。
@@ -137,6 +143,12 @@ func summarize(ss []Sample) Window {
 	return w
 }
 
+// egressBytes 是单出口累计流量。
+type egressBytes struct {
+	Up   int64 `json:"up"`
+	Down int64 `json:"down"`
+}
+
 // Monitor 是健康监控中枢。
 type Monitor struct {
 	mu        sync.Mutex
@@ -146,6 +158,14 @@ type Monitor struct {
 	consec    map[string]int
 	alerted   map[string]bool
 	lastAlert map[string]time.Time
+	traffic   map[string]*egressBytes
+
+	// AlertAfter / AlertCooldown 可由配置覆盖；零值用默认。
+	AlertAfter    int
+	AlertCooldown time.Duration
+
+	// PersistPath 非空时启用快照落盘与启动恢复。
+	PersistPath string
 
 	// Targets 返回当前可探测的出口列表；配置热重载后自动跟随。
 	Targets func() []Target
@@ -155,8 +175,12 @@ type Monitor struct {
 	SniffActive func() (int, int)
 	QUICActive  func() (int, int)
 
+	// Guard 在探测拨号前校验目标（可为空）。用于接入 selfguard：
+	// 出口地址若被配置成网关自身，探测环路和数据面环路一样危险。
+	Guard func(addr string) error
+
 	now  func() time.Time
-	dial func(ctx context.Context, addr string) (time.Duration, error)
+	dial func(ctx context.Context, addr string, socks5 bool) (time.Duration, error)
 }
 
 // New 构造 Monitor。
@@ -168,18 +192,9 @@ func New() *Monitor {
 		consec:    make(map[string]int),
 		alerted:   make(map[string]bool),
 		lastAlert: make(map[string]time.Time),
+		traffic:   make(map[string]*egressBytes),
 		now:       time.Now,
-		dial: func(ctx context.Context, addr string) (time.Duration, error) {
-			d := net.Dialer{}
-			start := time.Now()
-			c, err := d.DialContext(ctx, "tcp", addr)
-			el := time.Since(start)
-			if err != nil {
-				return el, err
-			}
-			c.Close()
-			return el, nil
-		},
+		dial: dialProbe,
 	}
 }
 
@@ -214,16 +229,36 @@ func (m *Monitor) probeOnce(ctx context.Context) {
 		if tgt.Addr == "" {
 			continue
 		}
+		if m.Guard != nil {
+			if err := m.Guard(tgt.Addr); err != nil {
+				// 目标是网关自身：跳过而不是记失败，这不是链路故障。
+				continue
+			}
+		}
 		wg.Add(1)
 		go func(tgt Target) {
 			defer wg.Done()
 			dctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
-			el, err := m.dial(dctx, tgt.Addr)
+			el, err := m.dial(dctx, tgt.Addr, tgt.Socks5)
 			m.recordProbe(tgt.Name, err == nil, el.Milliseconds())
 		}(tgt)
 	}
 	wg.Wait()
+}
+
+func (m *Monitor) alertAfter() int {
+	if m.AlertAfter > 0 {
+		return m.AlertAfter
+	}
+	return DefaultAlertAfter
+}
+
+func (m *Monitor) alertCooldown() time.Duration {
+	if m.AlertCooldown > 0 {
+		return m.AlertCooldown
+	}
+	return DefaultAlertCooldown
 }
 
 func (m *Monitor) recordProbe(name string, ok bool, ms int64) {
@@ -244,11 +279,11 @@ func (m *Monitor) recordProbe(name string, ok bool, ms int64) {
 		m.consec[name] = 0
 	} else {
 		m.consec[name]++
-		if m.consec[name] == alertAfter && !m.alerted[name] &&
-			now.Sub(m.lastAlert[name]) >= alertCooldown {
+		if m.consec[name] == m.alertAfter() && !m.alerted[name] &&
+			now.Sub(m.lastAlert[name]) >= m.alertCooldown() {
 			m.alerted[name] = true
 			m.lastAlert[name] = now
-			alert = fmt.Sprintf("🚨 出口 <b>%s</b> 连续 %d 次探测失败，链路可能中断", name, alertAfter)
+			alert = fmt.Sprintf("🚨 出口 <b>%s</b> 连续 %d 次探测失败，链路可能中断", name, m.alertAfter())
 		}
 	}
 	notify := m.Notify
@@ -280,21 +315,39 @@ func (m *Monitor) RecordDNS(ok bool, ms int64) {
 	m.mu.Unlock()
 }
 
+// AddEgressTraffic 累计某出口的真实转发字节数。
+func (m *Monitor) AddEgressTraffic(egress string, up, down int64) {
+	if egress == "" {
+		egress = "DIRECT"
+	}
+	m.mu.Lock()
+	t := m.traffic[egress]
+	if t == nil {
+		t = &egressBytes{}
+		m.traffic[egress] = t
+	}
+	t.Up += up
+	t.Down += down
+	m.mu.Unlock()
+}
+
 // EgressHealth 是单出口健康汇总。
 type EgressHealth struct {
-	Name     string
-	Probe1h  Window
-	Probe24h Window
-	Fw1h     Window
+	Name      string
+	Probe1h   Window
+	Probe24h  Window
+	Fw1h      Window
+	UpBytes   int64
+	DownBytes int64
 }
 
 // Health 是给 Bot / 面板的整体快照。
 type Health struct {
-	Egress                 []EgressHealth
-	DNS1h                  Window
-	DNS24h                 Window
-	TCPActive, TCPMax      int
-	QUICActive, QUICMax    int
+	Egress              []EgressHealth
+	DNS1h               Window
+	DNS24h              Window
+	TCPActive, TCPMax   int
+	QUICActive, QUICMax int
 }
 
 // Snapshot 返回当前健康快照。
@@ -305,13 +358,22 @@ func (m *Monitor) Snapshot() Health {
 
 	m.mu.Lock()
 	names := make([]string, 0, len(m.probes))
+	seen := make(map[string]bool, len(m.probes))
 	for n := range m.probes {
 		names = append(names, n)
+		seen[n] = true
 	}
-	// 有真实转发但没探测记录的出口（如 DIRECT）也要展示。
+	// 有真实转发/流量但没探测记录的出口（如 DIRECT）也要展示。
 	for n := range m.fw {
-		if _, ok := m.probes[n]; !ok {
+		if !seen[n] {
 			names = append(names, n)
+			seen[n] = true
+		}
+	}
+	for n := range m.traffic {
+		if !seen[n] {
+			names = append(names, n)
+			seen[n] = true
 		}
 	}
 	sort.Strings(names)
@@ -324,6 +386,9 @@ func (m *Monitor) Snapshot() Health {
 		}
 		if r := m.fw[n]; r != nil {
 			eh.Fw1h = summarize(r.since(h1))
+		}
+		if t := m.traffic[n]; t != nil {
+			eh.UpBytes, eh.DownBytes = t.Up, t.Down
 		}
 		out.Egress = append(out.Egress, eh)
 	}

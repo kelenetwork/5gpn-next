@@ -858,6 +858,13 @@ func (m *Manager) ApplyUpdate(ctx context.Context, tag string) (string, error) {
 	return m.Updater.Apply(ctx, tag)
 }
 
+// SetUpdateStageHook 设置升级阶段回调（nil 清除）。
+func (m *Manager) SetUpdateStageHook(fn func(stage, detail string)) {
+	if m.Updater != nil {
+		m.Updater.OnStage = fn
+	}
+}
+
 // CachedUpdate 返回最近一次成功检查缓存的最新版本；从未检查过时 ok=false。
 func (m *Manager) CachedUpdate() (*update.Release, time.Time, bool) {
 	if m.Updater == nil {

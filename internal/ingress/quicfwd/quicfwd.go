@@ -90,6 +90,9 @@ type Server struct {
 	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。
 	OnDial func(egress string, ok bool, ms int64)
 
+	// OnEgressTraffic 按出口维度累计真实转发字节数（可为空）。
+	OnEgressTraffic func(egress string, up, down int64)
+
 	seq atomic.Uint64
 
 	mu       sync.Mutex
@@ -123,6 +126,7 @@ type session struct {
 	counted      bool
 	host         string
 	action       string
+	egress       string
 
 	lastSeen atomic.Int64 // UnixNano
 	up       atomic.Int64
@@ -371,6 +375,7 @@ func (sc *session) connect(ctx context.Context, pc net.PacketConn, host string) 
 	}
 	sc.remote = remote
 	sc.action = actionName
+	sc.egress = d.Name()
 	reportConn := !sc.counted
 	sc.counted = true
 	pending := sc.pending
@@ -470,8 +475,19 @@ func (sc *session) finish(host, action string, failed bool) {
 }
 
 func (sc *session) reportTraffic(host string, up, down int64) {
-	if sc.srv.OnTraffic != nil && (up > 0 || down > 0) {
+	if up <= 0 && down <= 0 {
+		return
+	}
+	if sc.srv.OnTraffic != nil {
 		sc.srv.OnTraffic(host, up, down)
+	}
+	if sc.srv.OnEgressTraffic != nil {
+		sc.mu.Lock()
+		eg := sc.egress
+		sc.mu.Unlock()
+		if eg != "" {
+			sc.srv.OnEgressTraffic(eg, up, down)
+		}
 	}
 }
 

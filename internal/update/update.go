@@ -57,6 +57,24 @@ type Manager struct {
 	// 更新页展示，避免每次打开菜单都打 GitHub API。
 	cached   *Release
 	cachedAt time.Time
+
+	// OnStage 在升级各阶段切换时回调（可为空），供 Bot 实时刷新
+	// 进度消息。学 Parrot：黑盒升级中途挂了用户什么都不知道。
+	OnStage func(stage, detail string)
+}
+
+// 升级阶段常量。
+const (
+	StageDownload = "download"  // 下载二进制
+	StageVerify   = "verify"    // SHA256 校验
+	StageBackup   = "backup"    // 备份当前版本
+	StageRestart  = "restart"   // 调度事务，即将重启
+)
+
+func (m *Manager) stage(stage, detail string) {
+	if m.OnStage != nil {
+		m.OnStage(stage, detail)
+	}
 }
 
 // New 构造 Manager。
@@ -211,12 +229,14 @@ func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
 		}
 	}()
 
+	m.stage(StageDownload, tag)
 	binTmp := filepath.Join(tmpDir, asset)
 	if err := m.download(ctx, base+"/"+asset, binTmp, maxBinSize); err != nil {
 		return "", fmt.Errorf("下载二进制失败: %w", err)
 	}
 
 	// 校验 SHA256：清单缺失时拒绝安装，不做无校验升级
+	m.stage(StageVerify, tag)
 	sumTmp := filepath.Join(tmpDir, "SHA256SUMS")
 	if err := m.download(ctx, base+"/SHA256SUMS", sumTmp, 1<<20); err != nil {
 		return "", fmt.Errorf("下载校验清单失败，已中止升级: %w", err)
@@ -234,6 +254,7 @@ func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
 	}
 
 	// 备份当前版本
+	m.stage(StageBackup, m.Current)
 	if err := os.MkdirAll(backupDir, 0o750); err != nil {
 		return "", err
 	}
@@ -249,6 +270,7 @@ func (m *Manager) Apply(ctx context.Context, tag string) (string, error) {
 	// 必须让独立 transient unit 执行替换、重启和验证。若在主服务内
 	// systemctl restart 后继续验证，调用进程会先被 systemd 杀掉，后续
 	// 代码与 defer 根本不会运行，也就不可能真正自动回退。
+	m.stage(StageRestart, tag)
 	if err := scheduleTransaction(ctx, binTmp, backup, m.Current, tag, tmpDir); err != nil {
 		return "", err
 	}

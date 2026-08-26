@@ -19,7 +19,7 @@ func (b *Bot) showHealth(ctx context.Context, v view) {
 	sys := b.Manager.SysHealthNow()
 
 	var sb strings.Builder
-	sb.WriteString("🩺 <b>健康监控</b>\n")
+	fmt.Fprintf(&sb, "%s <b>健康监控</b>\n", em("🔮"))
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 
 	// ---- 出口 ----
@@ -57,9 +57,9 @@ func (b *Bot) showHealth(ctx context.Context, v view) {
 
 	// ---- 系统 ----
 	sb.WriteString("<b>网关进程</b>\n<blockquote>")
-	fmt.Fprintf(&sb, "💾 内存　<b>%.1f MB</b>\n", sys.MemoryMB)
+	fmt.Fprintf(&sb, "%s 内存　<b>%.1f MB</b>\n", em("💻"), sys.MemoryMB)
 	fmt.Fprintf(&sb, "🧵 goroutine　<b>%d</b>\n", sys.Goroutines)
-	fmt.Fprintf(&sb, "⏱ 运行　<b>%s</b>", sys.Uptime)
+	fmt.Fprintf(&sb, "%s 运行　<b>%s</b>", em("🔋"), sys.Uptime)
 	if sys.CertDays >= 0 {
 		icon := "🔐"
 		if sys.CertDays <= 14 {
@@ -116,6 +116,14 @@ func egressHealthLine(e monitor.EgressHealth) string {
 			e.Fw1h.Count, e.Fw1h.Fail, e.Fw1h.FailRate()*100)
 		wrote = true
 	}
+	if e.UpBytes > 0 || e.DownBytes > 0 {
+		if wrote {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "流量　↑ <b>%s</b> · ↓ <b>%s</b>",
+			humanBytes(e.UpBytes), humanBytes(e.DownBytes))
+		wrote = true
+	}
 	if !wrote {
 		sb.WriteString("暂无数据")
 	}
@@ -155,6 +163,19 @@ func (b *Bot) showHealthDetail(ctx context.Context, v view, name string) {
 		[]btn{{"🔄 刷新", "health_detail:" + name}},
 		[]btn{{"« 返回健康监控", "health"}},
 	))
+}
+
+// humanBytes 把字节数格式化为人类可读。
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 // rateIcon 按失败率返回红黄绿。

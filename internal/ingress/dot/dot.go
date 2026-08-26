@@ -317,19 +317,45 @@ func answerAddrs(resp *dns.Msg) []netip.Addr {
 	return out
 }
 
-// query 依次尝试上游，返回首个成功结果。
+// query 并发竞速所有上游，取最先返回的成功结果。
+//
+// 旧实现串行尝试：首选上游超时（4s）后才试下一个，最坏 8s——手机侧
+// 体感就是「卡一下」。竞速把尾延迟压到最慢也只有单上游超时；正常时
+// 取最快者，DNS 抖动被自然抹平。上游只有 2~3 个，放大流量可接受。
 func (s *Server) query(req *dns.Msg) (*dns.Msg, error) {
-	var lastErr error
 	start := time.Now()
+	if len(s.Upstream) == 1 {
+		resp, _, err := s.client.Exchange(req.Copy(), s.Upstream[0])
+		if s.OnUpstream != nil {
+			s.OnUpstream(err == nil && resp != nil, time.Since(start).Milliseconds())
+		}
+		if err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	type result struct {
+		resp *dns.Msg
+		err  error
+	}
+	ch := make(chan result, len(s.Upstream))
 	for _, up := range s.Upstream {
-		resp, _, err := s.client.Exchange(req.Copy(), up)
-		if err == nil && resp != nil {
+		go func(up string) {
+			resp, _, err := s.client.Exchange(req.Copy(), up)
+			ch <- result{resp, err}
+		}(up)
+	}
+	var lastErr error
+	for range s.Upstream {
+		r := <-ch
+		if r.err == nil && r.resp != nil {
 			if s.OnUpstream != nil {
 				s.OnUpstream(true, time.Since(start).Milliseconds())
 			}
-			return resp, nil
+			return r.resp, nil
 		}
-		lastErr = err
+		lastErr = r.err
 	}
 	if s.OnUpstream != nil {
 		s.OnUpstream(false, time.Since(start).Milliseconds())

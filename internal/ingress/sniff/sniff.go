@@ -75,6 +75,9 @@ type Server struct {
 	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。
 	OnDial func(egress string, ok bool, ms int64)
 
+	// OnEgressTraffic 按出口维度累计真实转发字节数（可为空）。
+	OnEgressTraffic func(egress string, up, down int64)
+
 	Handled atomic.Int64
 	Failed  atomic.Int64
 	NoHost  atomic.Int64
@@ -280,12 +283,18 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 
 	// 双向转发；br 中已读出的首包（含无法解析的私有协议字节）需要一并送出
 	var upN, downN int64
+	egressName := dialer.Name()
 	done := make(chan struct{}, 2)
 	go func() {
 		dst := io.Writer(up)
-		if s.OnTraffic != nil {
+		if s.OnTraffic != nil || s.OnEgressTraffic != nil {
 			dst = trafficWriter{dst: up, report: func(n int64) {
-				s.OnTraffic(host, n, 0)
+				if s.OnTraffic != nil {
+					s.OnTraffic(host, n, 0)
+				}
+				if s.OnEgressTraffic != nil {
+					s.OnEgressTraffic(egressName, n, 0)
+				}
 			}}
 		}
 		n, _ := io.Copy(dst, br)
@@ -295,9 +304,14 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	}()
 	go func() {
 		dst := io.Writer(cli)
-		if s.OnTraffic != nil {
+		if s.OnTraffic != nil || s.OnEgressTraffic != nil {
 			dst = trafficWriter{dst: cli, report: func(n int64) {
-				s.OnTraffic(host, 0, n)
+				if s.OnTraffic != nil {
+					s.OnTraffic(host, 0, n)
+				}
+				if s.OnEgressTraffic != nil {
+					s.OnEgressTraffic(egressName, 0, n)
+				}
 			}}
 		}
 		n, _ := io.Copy(dst, up)

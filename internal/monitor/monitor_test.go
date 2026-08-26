@@ -47,7 +47,7 @@ func TestAlertFiresAfterConsecutiveFailuresAndRecovers(t *testing.T) {
 	var notes []string
 	m.Notify = func(s string) { notes = append(notes, s) }
 
-	for i := 0; i < alertAfter+2; i++ {
+	for i := 0; i < DefaultAlertAfter+2; i++ {
 		m.recordProbe("hinet", false, 4000)
 	}
 	if len(notes) != 1 {
@@ -106,7 +106,7 @@ func TestProbeOnceUsesInjectedDialer(t *testing.T) {
 	m.Targets = func() []Target {
 		return []Target{{Name: "a", Addr: "10.0.0.1:1"}, {Name: "b", Addr: "10.0.0.2:1"}}
 	}
-	m.dial = func(_ context.Context, addr string) (time.Duration, error) {
+	m.dial = func(_ context.Context, addr string, _ bool) (time.Duration, error) {
 		if addr == "10.0.0.1:1" {
 			return 15 * time.Millisecond, nil
 		}

@@ -426,3 +426,73 @@ $('rule-input').addEventListener('keydown', (event) => {
 loadStatus();
 loadRules();
 setInterval(loadStatus, 15000);
+
+// ---------- 健康监控 ----------
+
+function fmtBytes(n) {
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GB';
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n || 0) + ' B';
+}
+
+function healthDot(fail, count) {
+  if (!count) return '⚪';
+  const r = fail / count;
+  if (r >= 0.2) return '🔴';
+  if (r > 0) return '🟡';
+  return '🟢';
+}
+
+function renderHealth(h) {
+  const list = $('health-list');
+  const sys = $('health-sys');
+  if (!list || !sys) return;
+  list.textContent = '';
+  sys.textContent = '';
+  if (!h || !h.enabled) {
+    list.appendChild(el('div', 'intro', '监控未启用。'));
+    return;
+  }
+  for (const e of (h.egress || [])) {
+    const row = el('div', 'row');
+    const left = el('div', 'row-main');
+    left.appendChild(el('strong', '', healthDot(e.probe_1h.fail, e.probe_1h.count) + ' ' + e.name));
+    const bits = [];
+    if (e.probe_1h.count) {
+      bits.push('探测 均 ' + e.probe_1h.avg_ms + 'ms · p95 ' + e.probe_1h.p95_ms + 'ms · 失败 ' + e.probe_1h.fail + '/' + e.probe_1h.count);
+    }
+    if (e.fw_1h.count) {
+      bits.push('转发 ' + e.fw_1h.count + ' 次 · 失败 ' + e.fw_1h.fail);
+    }
+    if (e.up_bytes || e.down_bytes) {
+      bits.push('↑ ' + fmtBytes(e.up_bytes) + ' · ↓ ' + fmtBytes(e.down_bytes));
+    }
+    left.appendChild(el('span', 'muted', bits.join('　') || '暂无数据'));
+    row.appendChild(left);
+    list.appendChild(row);
+  }
+  const stats = [
+    ['DNS 1h', h.dns_1h.count ? ('均 ' + h.dns_1h.avg_ms + 'ms / 失败 ' + h.dns_1h.fail) : '无查询'],
+    ['TCP 会话', h.tcp.active + ' / ' + h.tcp.max],
+    ['QUIC 会话', h.quic.max ? (h.quic.active + ' / ' + h.quic.max) : '未启用'],
+    ['内存', (h.sys.memory_mb || 0).toFixed(1) + ' MB'],
+    ['goroutine', String(h.sys.goroutines)],
+    ['证书剩余', h.sys.cert_days >= 0 ? (h.sys.cert_days + ' 天') : '—'],
+  ];
+  for (const [k, v2] of stats) {
+    const s = el('div', 'stat');
+    s.appendChild(el('span', 'stat-label', k));
+    s.appendChild(el('span', 'stat-value', v2));
+    sys.appendChild(s);
+  }
+}
+
+async function loadHealth() {
+  try {
+    renderHealth(await api('/api/health'));
+  } catch (_) { /* 健康数据失败不打扰 */ }
+}
+
+loadHealth();
+setInterval(loadHealth, 30000);

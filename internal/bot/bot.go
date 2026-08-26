@@ -560,16 +560,16 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("⚡️ <b>5gpn-NEXT</b> · <i>网关管理控制台</i>\n")
+	fmt.Fprintf(&sb, "%s <b>5gpn-NEXT</b> · <i>网关管理控制台</i>\n", em("🤖"))
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	fmt.Fprintf(&sb, "🟢 运行 <b>%s</b> · 版本 <code>%s</code>\n", st.Uptime, st.Version)
-	fmt.Fprintf(&sb, "🌐 当前出口 <b>%s</b>\n", html.EscapeString(cur))
-	fmt.Fprintf(&sb, "📋 分流规则 <b>%d</b> 条\n", st.Rules)
+	fmt.Fprintf(&sb, "%s 运行 <b>%s</b> · 版本 <code>%s</code>\n", em("🔋"), st.Uptime, st.Version)
+	fmt.Fprintf(&sb, "%s 当前出口 <b>%s</b>\n", em("🌏"), html.EscapeString(cur))
+	fmt.Fprintf(&sb, "%s 分流规则 <b>%d</b> 条\n", em("🧭"), st.Rules)
 
 	// 升级横幅：缓存里有未忽略的新版本时，在主菜单直接提示。
 	newTag := b.Manager.UpdateBanner()
 	if newTag != "" {
-		fmt.Fprintf(&sb, "\n🆕 <b>新版本 %s 可用</b> · 点下方按钮升级\n", html.EscapeString(newTag))
+		fmt.Fprintf(&sb, "\n%s <b>新版本 %s 可用</b> · 点下方按钮一键升级\n", em("🚀"), html.EscapeString(newTag))
 	}
 	sb.WriteString("\n<i>请选择要执行的操作 ↓</i>")
 
@@ -1237,10 +1237,46 @@ func (b *Bot) doUpdateCheck(ctx context.Context, v view) {
 	))
 }
 
+// updateStages 是升级阶段的展示顺序与文案。
+var updateStages = []struct{ key, label string }{
+	{"download", "⬇️ 下载新版本"},
+	{"verify", "🔎 校验哈希"},
+	{"backup", "📦 备份当前版本"},
+	{"restart", "🔄 重启生效"},
+}
+
+// renderUpdateProgress 渲染升级进度清单：已完成 ✅、进行中 ⏳、未开始 ○。
+func renderUpdateProgress(tag, current string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s <b>正在升级到 %s</b>\n", em("🚀"), html.EscapeString(tag))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	reached := true
+	for _, st := range updateStages {
+		switch {
+		case st.key == current:
+			fmt.Fprintf(&sb, "⏳ %s <b>← 进行中</b>\n", st.label)
+			reached = false
+		case reached:
+			fmt.Fprintf(&sb, "✅ %s\n", st.label)
+		default:
+			fmt.Fprintf(&sb, "○ %s\n", st.label)
+		}
+	}
+	sb.WriteString("\n<i>重启后由独立事务健康检查，失败自动回退。</i>")
+	return sb.String()
+}
+
 func (b *Bot) doUpdateApply(ctx context.Context, v view, tag string) {
-	b.render(ctx, v, fmt.Sprintf(
-		"🚀 正在升级到 <code>%s</code> …\n\n<i>服务将短暂重启，请稍候。</i>",
-		html.EscapeString(tag)), "")
+	b.render(ctx, v, renderUpdateProgress(tag, "download"), "")
+
+	// 阶段回调：每步刷新同一条消息。回调来自升级 goroutine，
+	// 用独立短超时 context，绝不阻塞升级本身。
+	b.Manager.SetUpdateStageHook(func(stage, _ string) {
+		sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+		b.render(sctx, v, renderUpdateProgress(tag, stage), "")
+		scancel()
+	})
+	defer b.Manager.SetUpdateStageHook(nil)
 
 	// 升级会重启本进程，用独立 context 避免被取消
 	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -1251,7 +1287,7 @@ func (b *Bot) doUpdateApply(ctx context.Context, v view, tag string) {
 		b.render(ctx, v, errBox("升级失败", err), backTo("update"))
 		return
 	}
-	b.render(ctx, v, "✅ <b>升级任务已启动</b>\n\n"+html.EscapeString(msg), backTo("menu"))
+	b.render(ctx, v, fmt.Sprintf("%s <b>升级任务已启动</b>\n\n%s", em("✅"), html.EscapeString(msg)), backTo("menu"))
 }
 
 func (b *Bot) showRollback(ctx context.Context, v view) {

@@ -61,8 +61,21 @@ type Config struct {
 	// 自动更新检查
 	Update UpdateConfig `json:"update"`
 
+	// Monitor 是健康监控告警配置
+	Monitor MonitorConfig `json:"monitor,omitempty"`
+
 	// 日志
 	LogPath string `json:"log_path"`
+}
+
+// MonitorConfig 是健康监控告警配置。
+type MonitorConfig struct {
+	// AlertAfter 连续失败多少次后告警；0 表示默认（3 次）。
+	AlertAfter int `json:"alert_after,omitempty"`
+	// AlertCooldownMinutes 同一出口告警冷却分钟数；0 表示默认（30 分钟）。
+	AlertCooldownMinutes int `json:"alert_cooldown_minutes,omitempty"`
+	// AlertsDisabled 为 true 时不推送出口告警（采样照常）。
+	AlertsDisabled bool `json:"alerts_disabled,omitempty"`
 }
 
 // DNSConfig 是 iOS 与 Android 共用的加密 DNS 接入配置。

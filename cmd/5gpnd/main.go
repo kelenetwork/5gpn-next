@@ -327,14 +327,36 @@ func cmdRun(args []string) error {
 	// 健康监控：出口探测 + 真实转发埋点 + DoT 上游耗时。纯观测，
 	// 任何采样失败都不影响数据面。
 	health := monitor.New()
+	health.PersistPath = "/var/lib/5gpn-next/health.json"
+	health.Load()
+	if a.cfg.Monitor.AlertAfter > 0 {
+		health.AlertAfter = a.cfg.Monitor.AlertAfter
+	}
+	if a.cfg.Monitor.AlertCooldownMinutes > 0 {
+		health.AlertCooldown = time.Duration(a.cfg.Monitor.AlertCooldownMinutes) * time.Minute
+	}
 	health.Targets = func() []monitor.Target {
 		var out []monitor.Target
 		for _, e := range a.cfg.Egress {
+			if e.Addr != "" && e.Type == "socks5" {
+				// 优先探测本机 mihomo 桥（真实 SOCKS5 协商）：这才是
+				// 用户流量真正走的入口；节点端口只测 TCP 可达。
+				out = append(out, monitor.Target{Name: e.Name, Addr: e.Addr, Socks5: true})
+				continue
+			}
 			if e.Server != "" {
 				out = append(out, monitor.Target{Name: e.Name, Addr: e.Server})
 			}
 		}
 		return out
+	}
+	// 探测同样接 selfguard：出口地址被配置成网关自身时跳过，
+	// 防止探测流量参与自连接环路。
+	health.Guard = func(addr string) error {
+		if egress.IsSelfTakeover(addr) {
+			return egress.ErrSelfConnect
+		}
+		return nil
 	}
 	mgr.Health = health
 	// 计数器分散在 sniff（连接级）与 DoT（查询级），用闭包延迟聚合。
@@ -436,9 +458,14 @@ func cmdRun(args []string) error {
 	defer refreshCancel()
 	go func() {
 		fetcher := ruleset.NewFetcher("/var/lib/5gpn-next/rulesets")
+		// 连续整轮失败 2 次才告警：单轮失败可能只是网络抖动，只写日志
+		// 没人看，规则彻底刷不动时广告库/分流会悄悄退化。
+		consecFail := 0
+		alerted := false
 		// 启动后先刷一轮（缓存可能已陈旧或不存在）
 		for {
 			changed := false
+			anyFail := false
 			// 必须使用 EffectiveRuleSets：默认广告规则由 ad_block 动态注入，
 			// 不在磁盘 rulesets 数组里。只遍历 cfg.RuleSets 会让广告库永不更新。
 			for _, rs := range mgr.EffectiveRuleSets() {
@@ -450,6 +477,7 @@ func cmdRun(args []string) error {
 				fcancel()
 				if err != nil {
 					log.Printf("规则集 %s 后台刷新失败: %v（继续用缓存）", rs.Name, err)
+					anyFail = true
 					continue
 				}
 				if upd {
@@ -468,6 +496,22 @@ func cmdRun(args []string) error {
 				} else {
 					log.Printf("规则集已后台刷新并生效")
 				}
+			}
+			if anyFail {
+				consecFail++
+				if consecFail >= 2 && !alerted {
+					alerted = true
+					if health.Notify != nil {
+						health.Notify(fmt.Sprintf(
+							"⚠️ <b>规则集刷新连续 %d 轮失败</b>，广告拦截/分流规则可能滞后（仍在使用缓存）", consecFail))
+					}
+				}
+			} else {
+				if alerted && health.Notify != nil {
+					health.Notify("✅ <b>规则集刷新已恢复</b>")
+				}
+				consecFail = 0
+				alerted = false
 			}
 			select {
 			case <-refreshCtx.Done():
@@ -544,7 +588,8 @@ func cmdRun(args []string) error {
 			OnTraffic:  traffic.Traffic,
 			HintLookup: hints.Lookup,
 			ClientCIDR: clientPfx,
-			OnDial:     health.RecordForward,
+			OnDial:          health.RecordForward,
+			OnEgressTraffic: health.AddEgressTraffic,
 		}
 		sniffSrv = sn
 		health.SniffActive = sn.ActiveConns
@@ -597,7 +642,8 @@ func cmdRun(args []string) error {
 				OnTraffic:  traffic.Traffic,
 				HintLookup: hints.Lookup,
 				ClientCIDR: clientPfx,
-				OnDial:     health.RecordForward,
+				OnDial:          health.RecordForward,
+				OnEgressTraffic: health.AddEgressTraffic,
 			}
 			quicSrv = qs
 			health.QUICActive = qs.ActiveSessions
@@ -648,16 +694,34 @@ func cmdRun(args []string) error {
 
 	// 健康监控探测循环：随 ingress 生命周期一起停。
 	go health.Run(ingressCtx)
+	// 周期落盘 + 退出前最后保存：升级/重启后历史仍可回看。
+	go func() {
+		t := time.NewTicker(monitor.SaveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ingressCtx.Done():
+				_ = health.Save()
+				return
+			case <-t.C:
+				if err := health.Save(); err != nil {
+					log.Printf("健康监控快照落盘失败: %v", err)
+				}
+			}
+		}
+	}()
 
 	// Telegram Bot
 	botCtx, botCancel := context.WithCancel(context.Background())
 	defer botCancel()
 	if a.cfg.Bot.Token != "" && len(a.cfg.Bot.Admins) > 0 {
 		tb := bot.New(a.cfg.Bot.Token, a.cfg.Bot.Admins, mgr, version)
-		health.Notify = func(text string) {
-			nctx, ncancel := context.WithTimeout(botCtx, 30*time.Second)
-			tb.Notify(nctx, text)
-			ncancel()
+		if !a.cfg.Monitor.AlertsDisabled {
+			health.Notify = func(text string) {
+				nctx, ncancel := context.WithTimeout(botCtx, 30*time.Second)
+				tb.Notify(nctx, text)
+				ncancel()
+			}
 		}
 		if panelHandler != nil {
 			tb.PanelURL = fmt.Sprintf("https://%s:%d/",
