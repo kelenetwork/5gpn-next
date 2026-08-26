@@ -82,7 +82,7 @@ func (b *Bot) showHealth(ctx context.Context, v view) {
 	if len(cur) > 0 {
 		rows = append(rows, cur)
 	}
-	rows = append(rows, []btn{{"🔄 刷新", "health"}}, []btn{{"« 返回主菜单", "menu"}})
+	rows = append(rows, []btn{{"🔄 刷新", "health"}, {"🚨 告警设置", "monitor_settings"}}, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
@@ -203,4 +203,32 @@ func levelIcon(cur, max int) string {
 	default:
 		return "🟢"
 	}
+}
+
+// showMonitorSettings 展示并调整健康监控告警设置。
+func (b *Bot) showMonitorSettings(ctx context.Context, v view) {
+	after, cooldown, disabled := b.Manager.MonitorSettings()
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s <b>告警设置</b>\n", em("🚫"))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	state := "🟢 开启"
+	if disabled {
+		state = "🔴 关闭"
+	}
+	fmt.Fprintf(&sb, "告警推送　<b>%s</b>\n", state)
+	fmt.Fprintf(&sb, "连续失败阈值　<b>%d</b> 次（约 %d 分钟无响应）\n", after, after)
+	fmt.Fprintf(&sb, "告警冷却　<b>%d</b> 分钟\n", cooldown)
+	sb.WriteString("\n<i>出口连续探测失败达到阈值时 Bot 主动推送；恢复后自动通知。修改即时生效并持久化。</i>")
+
+	toggleLabel := "🔴 关闭告警推送"
+	if disabled {
+		toggleLabel = "🟢 开启告警推送"
+	}
+	b.render(ctx, v, sb.String(), inlineKeyboard(
+		[]btn{{toggleLabel, "monitor_toggle_alerts"}},
+		[]btn{{fmt.Sprintf("🚨 失败阈值：%d 次", after), "ask_monitor_after"},
+			{fmt.Sprintf("🔕 冷却：%d 分钟", cooldown), "ask_monitor_cooldown"}},
+		[]btn{{"« 返回健康监控", "health"}},
+	))
 }

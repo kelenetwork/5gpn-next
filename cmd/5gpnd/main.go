@@ -729,9 +729,30 @@ func cmdRun(args []string) error {
 		}
 		go tb.Run(botCtx)
 
-		// 启动通知只在版本变化时发一次：
-		// 日常 restart / 崩溃拉起不再刷屏。
-		if markStartupNotified(version) {
+		// 升级事务结果通知：新进程启动后消费事务落盘的最终结果，
+		// 把「升级成功 / 已回退 / 回退失败」主动推给用户，闭合升级
+		// 进度清单的最后一环。消费式读取保证只通知一次。
+		if r, ok := update.ConsumeLastResult(); ok {
+			go func() {
+				time.Sleep(2 * time.Second)
+				switch r.Status {
+				case "success":
+					tb.Notify(botCtx, fmt.Sprintf(
+						"🎉 <b>升级完成</b>\n\n<code>%s</code> → <code>%s</code>\n新版本已通过健康检查，正在运行。",
+						r.From, r.To))
+				case "rolled_back":
+					tb.Notify(botCtx, fmt.Sprintf(
+						"↩️ <b>升级已回退</b>\n\n<code>%s</code> 启动失败，已自动回退到 <code>%s</code> 并恢复运行。",
+						r.To, r.From))
+				default:
+					tb.Notify(botCtx, fmt.Sprintf(
+						"⚠️ <b>升级异常</b>（%s）\n\n目标 <code>%s</code>，当前运行 <code>%s</code>，请检查服务状态。",
+						r.Status, r.To, version))
+				}
+			}()
+		} else if markStartupNotified(version) {
+			// 启动通知只在版本变化时发一次：
+			// 日常 restart / 崩溃拉起不再刷屏。
 			go func() {
 				time.Sleep(2 * time.Second)
 				tb.Notify(botCtx, "✅ <b>5gpn-NEXT 已就绪</b>\n\n"+

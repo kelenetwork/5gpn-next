@@ -452,6 +452,34 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showUpdate(ctx, v)
 	case strings.HasPrefix(cmd, "update_apply:"):
 		b.doUpdateApply(ctx, v, strings.TrimPrefix(cmd, "update_apply:"))
+	case cmd == "update_backups":
+		b.showUpdateBackups(ctx, v)
+	case cmd == "update_history":
+		b.showUpdateHistory(ctx, v)
+	case cmd == "ask_update_interval":
+		b.ask(ctx, v, "update_interval",
+			"⏱ <b>调整检查间隔</b>\n\n"+
+				"请输入小时数（1-168），例如 <code>1</code> 或 <code>6</code>。\n\n"+
+				"<i>改动保存后，下次重启起完全生效。</i>")
+	case cmd == "monitor_settings":
+		b.showMonitorSettings(ctx, v)
+	case cmd == "monitor_toggle_alerts":
+		_, _, disabled := b.Manager.MonitorSettings()
+		newVal := !disabled
+		if err := b.Manager.SetMonitorAlerts(0, 0, &newVal); err != nil {
+			b.render(ctx, v, errBox("设置失败", err), backTo("monitor_settings"))
+			return
+		}
+		b.showMonitorSettings(ctx, v)
+	case cmd == "ask_monitor_after":
+		b.ask(ctx, v, "monitor_after",
+			"🚨 <b>连续失败阈值</b>\n\n"+
+				"出口连续多少次探测失败才告警？请输入次数（1-60）。\n\n"+
+				"<i>每次探测间隔 60 秒；3 表示约 3 分钟无响应才提醒。</i>")
+	case cmd == "ask_monitor_cooldown":
+		b.ask(ctx, v, "monitor_cooldown",
+			"🔕 <b>告警冷却</b>\n\n"+
+				"同一出口两次告警之间至少间隔多少分钟？请输入分钟数（1-1440）。")
 	case cmd == "update_rollback":
 		b.showRollback(ctx, v)
 	case strings.HasPrefix(cmd, "rollback:"):
@@ -525,6 +553,42 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 			return
 		}
 		b.showAdBlock(ctx, v)
+
+	case "update_interval":
+		hours, err := strconv.Atoi(strings.TrimSpace(text))
+		if err != nil {
+			b.render(ctx, v, errBox("输入无效", fmt.Errorf("请输入 1-168 的整数")), backTo("update"))
+			return
+		}
+		if err := b.Manager.SetUpdateInterval(hours); err != nil {
+			b.render(ctx, v, errBox("设置失败", err), backTo("update"))
+			return
+		}
+		b.showUpdate(ctx, v)
+
+	case "monitor_after":
+		n, err := strconv.Atoi(strings.TrimSpace(text))
+		if err != nil {
+			b.render(ctx, v, errBox("输入无效", fmt.Errorf("请输入 1-60 的整数")), backTo("monitor_settings"))
+			return
+		}
+		if err := b.Manager.SetMonitorAlerts(n, 0, nil); err != nil {
+			b.render(ctx, v, errBox("设置失败", err), backTo("monitor_settings"))
+			return
+		}
+		b.showMonitorSettings(ctx, v)
+
+	case "monitor_cooldown":
+		n, err := strconv.Atoi(strings.TrimSpace(text))
+		if err != nil {
+			b.render(ctx, v, errBox("输入无效", fmt.Errorf("请输入 1-1440 的整数")), backTo("monitor_settings"))
+			return
+		}
+		if err := b.Manager.SetMonitorAlerts(0, n, nil); err != nil {
+			b.render(ctx, v, errBox("设置失败", err), backTo("monitor_settings"))
+			return
+		}
+		b.showMonitorSettings(ctx, v)
 
 	case "probe":
 		target := strings.TrimSpace(text)
@@ -1178,6 +1242,8 @@ func (b *Bot) showUpdate(ctx context.Context, v view) {
 		rows = append(rows, []btn{{"🔕 忽略 " + newTag, "update_ignore:" + newTag}})
 	}
 	rows = append(rows, []btn{{"🔄 立即检查", "update_check"}, {autoApplyLabel(autoApply), "update_toggle_auto"}})
+	rows = append(rows, []btn{{fmt.Sprintf("⏱ 检查间隔：%d 小时", interval), "ask_update_interval"}})
+	rows = append(rows, []btn{{"🗂 备份列表", "update_backups"}, {"📋 升级历史", "update_history"}})
 	if len(ignored) > 0 {
 		rows = append(rows, []btn{{fmt.Sprintf("🧹 清空忽略（%d）", len(ignored)), "update_clear_ignored"}})
 	}
@@ -1546,4 +1612,76 @@ func counterName(k string) string {
 		return "IPv6 回落"
 	}
 	return k
+}
+
+// showUpdateBackups 展示可回退版本详情（学 Parrot 的备份列表）。
+func (b *Bot) showUpdateBackups(ctx context.Context, v view) {
+	backups := b.Manager.UpdateBackups()
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s <b>本地版本备份</b>\n", em("♻️"))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	if len(backups) == 0 {
+		sb.WriteString("暂无备份。首次升级时会自动保留当前版本。\n")
+	} else {
+		sb.WriteString("<i>升级时自动保留的历史二进制，可随时回退：</i>\n<blockquote>")
+		for i, bk := range backups {
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "💾 <code>%s</code>　%.1f MB", html.EscapeString(bk.Tag), bk.SizeMB)
+			if !bk.ModTime.IsZero() {
+				fmt.Fprintf(&sb, "　%s", bk.ModTime.Local().Format("01-02 15:04"))
+			}
+		}
+		sb.WriteString("</blockquote>\n")
+	}
+
+	rows := [][]btn{}
+	if len(backups) > 0 {
+		rows = append(rows, []btn{{"⏪ 回退到旧版本", "update_rollback"}})
+	}
+	rows = append(rows, []btn{{"« 返回版本更新", "update"}})
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+// showUpdateHistory 展示历次升级结果（学 Parrot 的更新日志）。
+func (b *Bot) showUpdateHistory(ctx context.Context, v view) {
+	hist := b.Manager.UpdateHistory(10)
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s <b>升级历史</b>\n", em("📊"))
+	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	if len(hist) == 0 {
+		sb.WriteString("暂无记录。升级完成后（无论成败）都会在这里留档。\n")
+	} else {
+		sb.WriteString("<blockquote>")
+		for i, r := range hist {
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			icon := "❓"
+			label := r.Status
+			switch r.Status {
+			case "success":
+				icon, label = "✅", "成功"
+			case "rolled_back":
+				icon, label = "↩️", "已回退"
+			case "install_failed":
+				icon, label = "❌", "安装失败"
+			case "rollback_failed":
+				icon, label = "🆘", "回退失败"
+			}
+			fmt.Fprintf(&sb, "%s %s → %s　%s　%s",
+				icon,
+				html.EscapeString(r.From), html.EscapeString(r.To),
+				label,
+				time.Unix(r.At, 0).Local().Format("01-02 15:04"))
+		}
+		sb.WriteString("</blockquote>\n")
+	}
+
+	b.render(ctx, v, sb.String(), inlineKeyboard(
+		[]btn{{"« 返回版本更新", "update"}},
+	))
 }

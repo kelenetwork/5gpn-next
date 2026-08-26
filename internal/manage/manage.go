@@ -858,6 +858,80 @@ func (m *Manager) ApplyUpdate(ctx context.Context, tag string) (string, error) {
 	return m.Updater.Apply(ctx, tag)
 }
 
+// UpdateBackups 返回可回退版本详情。
+func (m *Manager) UpdateBackups() []update.BackupInfo {
+	if m.Updater == nil {
+		return nil
+	}
+	return m.Updater.Backups()
+}
+
+// UpdateHistory 返回历次升级结果，新的在前。
+func (m *Manager) UpdateHistory(limit int) []update.TxResult {
+	return update.History(limit)
+}
+
+// MonitorSettings 返回告警设置（含默认值归一）。
+func (m *Manager) MonitorSettings() (alertAfter, cooldownMin int, disabled bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	a := m.Cfg.Monitor.AlertAfter
+	if a <= 0 {
+		a = 3
+	}
+	c := m.Cfg.Monitor.AlertCooldownMinutes
+	if c <= 0 {
+		c = 30
+	}
+	return a, c, m.Cfg.Monitor.AlertsDisabled
+}
+
+// SetMonitorAlerts 调整告警设置并持久化 + 应用到运行态。
+// alertAfter/cooldownMin 传 0 表示不修改该项。
+func (m *Manager) SetMonitorAlerts(alertAfter, cooldownMin int, disabled *bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if alertAfter > 0 {
+		if alertAfter > 60 {
+			return fmt.Errorf("连续失败阈值 %d 过大（1-60）", alertAfter)
+		}
+		m.Cfg.Monitor.AlertAfter = alertAfter
+	}
+	if cooldownMin > 0 {
+		if cooldownMin > 1440 {
+			return fmt.Errorf("冷却 %d 分钟过大（1-1440）", cooldownMin)
+		}
+		m.Cfg.Monitor.AlertCooldownMinutes = cooldownMin
+	}
+	if disabled != nil {
+		m.Cfg.Monitor.AlertsDisabled = *disabled
+	}
+	if err := m.Cfg.Save(m.ConfigPath); err != nil {
+		return err
+	}
+	if m.Health != nil {
+		if m.Cfg.Monitor.AlertAfter > 0 {
+			m.Health.AlertAfter = m.Cfg.Monitor.AlertAfter
+		}
+		if m.Cfg.Monitor.AlertCooldownMinutes > 0 {
+			m.Health.AlertCooldown = time.Duration(m.Cfg.Monitor.AlertCooldownMinutes) * time.Minute
+		}
+	}
+	return nil
+}
+
+// SetUpdateInterval 调整检查间隔（小时）并持久化。
+// 注意：运行中的检查循环用的是启动时读取的间隔，改动重启后完全生效。
+func (m *Manager) SetUpdateInterval(hours int) error {
+	if hours < 1 || hours > 168 {
+		return fmt.Errorf("间隔 %d 小时超出范围（1-168）", hours)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Cfg.Update.IntervalHours = hours
+	return m.Cfg.Save(m.ConfigPath)
+}
+
 // SetUpdateStageHook 设置升级阶段回调（nil 清除）。
 func (m *Manager) SetUpdateStageHook(fn func(stage, detail string)) {
 	if m.Updater != nil {
