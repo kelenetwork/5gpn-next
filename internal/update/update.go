@@ -52,6 +52,11 @@ type Manager struct {
 	lastSeen     string // 最近一次已通知过的版本，避免重复推送
 	notifiedPath string // 测试可注入；生产固定在 stateDir
 	busy         bool
+
+	// cached 是最近一次成功查询到的最新 release；供主菜单横幅与
+	// 更新页展示，避免每次打开菜单都打 GitHub API。
+	cached   *Release
+	cachedAt time.Time
 }
 
 // New 构造 Manager。
@@ -91,10 +96,24 @@ func (m *Manager) Latest(ctx context.Context) (*Release, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&r); err != nil {
 		return nil, err
 	}
-	return &Release{
+	rel := &Release{
 		Tag: r.TagName, Name: r.Name, Notes: r.Body,
 		Published: r.PublishedAt, Prerelease: r.Prerelease,
-	}, nil
+	}
+	m.mu.Lock()
+	m.cached, m.cachedAt = rel, time.Now()
+	m.mu.Unlock()
+	return rel, nil
+}
+
+// Cached 返回最近一次成功查询的结果与查询时间；从未成功过时 ok=false。
+func (m *Manager) Cached() (*Release, time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cached == nil {
+		return nil, time.Time{}, false
+	}
+	return m.cached, m.cachedAt, true
 }
 
 // HasUpdate 判断是否存在比当前更新的版本。

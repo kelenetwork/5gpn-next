@@ -118,6 +118,9 @@ type UpdateConfig struct {
 	IntervalHours int `json:"interval_hours"`
 	// AutoApply 为 true 时自动安装（默认关闭，仅推送通知）
 	AutoApply bool `json:"auto_apply"`
+	// IgnoredVersions 是用户明确忽略的版本 tag；被忽略的版本不再
+	// 推送通知，也不在主菜单显示升级横幅。
+	IgnoredVersions []string `json:"ignored_versions,omitempty"`
 }
 
 // BotConfig 是 Telegram 管理机器人配置。

@@ -704,7 +704,7 @@ func cmdRun(args []string) error {
 					cctx, cancel := context.WithTimeout(botCtx, 60*time.Second)
 					has, rel, err := updater.HasUpdate(cctx)
 					cancel()
-					if err != nil || !has || !updater.ShouldNotify(rel.Tag) {
+					if err != nil || !has || mgr.IsIgnoredVersion(rel.Tag) || !updater.ShouldNotify(rel.Tag) {
 						continue
 					}
 					tb.Notify(botCtx, fmt.Sprintf(

@@ -426,6 +426,30 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showAndroid(ctx, v)
 	case cmd == "update_check":
 		b.doUpdateCheck(ctx, v)
+	case strings.HasPrefix(cmd, "update_ignore:"):
+		if err := b.Manager.IgnoreVersion(strings.TrimPrefix(cmd, "update_ignore:")); err != nil {
+			b.render(ctx, v, errBox("忽略失败", err), backTo("update"))
+			return
+		}
+		b.showUpdate(ctx, v)
+	case strings.HasPrefix(cmd, "update_unignore:"):
+		if err := b.Manager.UnignoreVersion(strings.TrimPrefix(cmd, "update_unignore:")); err != nil {
+			b.render(ctx, v, errBox("操作失败", err), backTo("update"))
+			return
+		}
+		b.showUpdate(ctx, v)
+	case cmd == "update_clear_ignored":
+		for _, t := range b.Manager.IgnoredVersions() {
+			_ = b.Manager.UnignoreVersion(t)
+		}
+		b.showUpdate(ctx, v)
+	case cmd == "update_toggle_auto":
+		_, cur, _ := b.Manager.UpdateSettings()
+		if err := b.Manager.SetUpdateAutoApply(!cur); err != nil {
+			b.render(ctx, v, errBox("设置失败", err), backTo("update"))
+			return
+		}
+		b.showUpdate(ctx, v)
 	case strings.HasPrefix(cmd, "update_apply:"):
 		b.doUpdateApply(ctx, v, strings.TrimPrefix(cmd, "update_apply:"))
 	case cmd == "update_rollback":
@@ -540,17 +564,28 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	fmt.Fprintf(&sb, "🟢 运行 <b>%s</b> · 版本 <code>%s</code>\n", st.Uptime, st.Version)
 	fmt.Fprintf(&sb, "🌐 当前出口 <b>%s</b>\n", html.EscapeString(cur))
-	fmt.Fprintf(&sb, "📋 分流规则 <b>%d</b> 条\n\n", st.Rules)
-	sb.WriteString("<i>请选择要执行的操作 ↓</i>")
+	fmt.Fprintf(&sb, "📋 分流规则 <b>%d</b> 条\n", st.Rules)
 
-	b.render(ctx, v, sb.String(), inlineKeyboard(
+	// 升级横幅：缓存里有未忽略的新版本时，在主菜单直接提示。
+	newTag := b.Manager.UpdateBanner()
+	if newTag != "" {
+		fmt.Fprintf(&sb, "\n🆕 <b>新版本 %s 可用</b> · 点下方按钮升级\n", html.EscapeString(newTag))
+	}
+	sb.WriteString("\n<i>请选择要执行的操作 ↓</i>")
+
+	rows := [][]btn{}
+	if newTag != "" {
+		rows = append(rows, []btn{{"🚀 升级到 " + newTag, "update_apply:" + newTag}})
+	}
+	rows = append(rows,
 		[]btn{{"📊 运行状态", "status"}, {"📈 网关转发流量", "traffic"}},
 		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
 		[]btn{{"🛡 广告拦截", "adblock"}, {"🩺 连通诊断", "ask_probe"}},
 		[]btn{{"💓 健康监控", "health"}},
 		[]btn{{"📱 客户端接入", "client"}, {"🖥 内网面板", "panel"}},
 		[]btn{{"🚀 版本更新", "update"}},
-	))
+	)
+	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
 func (b *Bot) showStatus(ctx context.Context, v view) {
@@ -1095,19 +1130,76 @@ func (b *Bot) showAndroid(ctx context.Context, v view) {
 // ---------- 更新 ----------
 
 func (b *Bot) showUpdate(ctx context.Context, v view) {
+	checkOn, autoApply, interval := b.Manager.UpdateSettings()
+	ignored := b.Manager.IgnoredVersions()
+	rel, checkedAt, hasCache := b.Manager.CachedUpdate()
+
 	var sb strings.Builder
 	sb.WriteString("🚀 <b>版本更新</b>\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	fmt.Fprintf(&sb, "🏷 当前版本　<code>%s</code>\n\n", html.EscapeString(b.Version))
-	sb.WriteString("<i>升级会校验文件哈希后替换程序并重启；\n")
-	sb.WriteString("若新版本启动失败，将自动回退到当前版本。</i>")
+	fmt.Fprintf(&sb, "🏷 当前版本　<code>%s</code>\n", html.EscapeString(b.Version))
+	if checkOn {
+		fmt.Fprintf(&sb, "🔁 自动检查　<b>开</b> · 每 %d 小时\n", interval)
+	} else {
+		sb.WriteString("🔁 自动检查　<b>关</b>\n")
+	}
+	fmt.Fprintf(&sb, "🤖 自动安装　<b>%s</b>\n", onOff(autoApply))
+	if len(ignored) > 0 {
+		fmt.Fprintf(&sb, "🔕 已忽略　<code>%s</code>\n", html.EscapeString(strings.Join(ignored, ", ")))
+	}
 
-	rows := [][]btn{{{"🔍 检查更新", "update_check"}}}
+	// 最近一次检查结果（缓存，不打网络）。
+	var newTag string
+	sb.WriteString("\n")
+	if hasCache && rel != nil {
+		if b.Manager.UpdateBanner() != "" {
+			newTag = rel.Tag
+			fmt.Fprintf(&sb, "🟢 <b>有新版本 %s</b>\n", html.EscapeString(rel.Tag))
+			if !rel.Published.IsZero() {
+				fmt.Fprintf(&sb, "📅 发布　%s\n", rel.Published.Format("2006-01-02 15:04"))
+			}
+			if notes := truncateText(strings.TrimSpace(rel.Notes), 800); notes != "" {
+				fmt.Fprintf(&sb, "\n📋 <b>更新内容</b>\n<blockquote expandable>%s</blockquote>\n", html.EscapeString(notes))
+			}
+		} else if b.Manager.IsIgnoredVersion(rel.Tag) && rel.Tag != b.Version {
+			fmt.Fprintf(&sb, "🔕 最新 <code>%s</code> 已被忽略\n", html.EscapeString(rel.Tag))
+		} else {
+			sb.WriteString("✅ 已是最新版本\n")
+		}
+		fmt.Fprintf(&sb, "<i>上次检查 %s</i>\n", checkedAt.Local().Format("01-02 15:04"))
+	} else {
+		sb.WriteString("<i>尚未检查过，点「立即检查」拉取最新版本信息。</i>\n")
+	}
+	sb.WriteString("\n<i>升级会校验哈希后替换程序并重启；启动失败自动回退。</i>")
+
+	var rows [][]btn
+	if newTag != "" {
+		rows = append(rows, []btn{{"🚀 立即更新到 " + newTag, "update_apply:" + newTag}})
+		rows = append(rows, []btn{{"🔕 忽略 " + newTag, "update_ignore:" + newTag}})
+	}
+	rows = append(rows, []btn{{"🔄 立即检查", "update_check"}, {autoApplyLabel(autoApply), "update_toggle_auto"}})
+	if len(ignored) > 0 {
+		rows = append(rows, []btn{{fmt.Sprintf("🧹 清空忽略（%d）", len(ignored)), "update_clear_ignored"}})
+	}
 	if len(b.Manager.RollbackVersions()) > 0 {
 		rows = append(rows, []btn{{"⏪ 回退到旧版本", "update_rollback"}})
 	}
 	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
+}
+
+func onOff(v bool) string {
+	if v {
+		return "开"
+	}
+	return "关"
+}
+
+func autoApplyLabel(on bool) string {
+	if on {
+		return "🤖 自动安装：开"
+	}
+	return "🚦 自动安装：关"
 }
 
 func (b *Bot) doUpdateCheck(ctx context.Context, v view) {

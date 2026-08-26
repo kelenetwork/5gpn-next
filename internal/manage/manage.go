@@ -858,6 +858,106 @@ func (m *Manager) ApplyUpdate(ctx context.Context, tag string) (string, error) {
 	return m.Updater.Apply(ctx, tag)
 }
 
+// CachedUpdate 返回最近一次成功检查缓存的最新版本；从未检查过时 ok=false。
+func (m *Manager) CachedUpdate() (*update.Release, time.Time, bool) {
+	if m.Updater == nil {
+		return nil, time.Time{}, false
+	}
+	return m.Updater.Cached()
+}
+
+// UpdateBanner 返回主菜单升级横幅所需的新版本 tag；无新版、已忽略或
+// 尚未检查过时返回空串。
+func (m *Manager) UpdateBanner() string {
+	rel, _, ok := m.CachedUpdate()
+	if !ok || rel == nil {
+		return ""
+	}
+	if !update.Newer(rel.Tag, m.currentVersion()) {
+		return ""
+	}
+	if m.IsIgnoredVersion(rel.Tag) {
+		return ""
+	}
+	return rel.Tag
+}
+
+func (m *Manager) currentVersion() string {
+	if m.Updater == nil {
+		return ""
+	}
+	return m.Updater.Current
+}
+
+// IsIgnoredVersion 报告某 tag 是否已被用户忽略。
+func (m *Manager) IsIgnoredVersion(tag string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.Cfg.Update.IgnoredVersions {
+		if t == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// IgnoredVersions 返回忽略列表副本。
+func (m *Manager) IgnoredVersions() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]string(nil), m.Cfg.Update.IgnoredVersions...)
+}
+
+// IgnoreVersion 把某 tag 加入忽略列表并持久化。
+func (m *Manager) IgnoreVersion(tag string) error {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return fmt.Errorf("版本号为空")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.Cfg.Update.IgnoredVersions {
+		if t == tag {
+			return nil
+		}
+	}
+	m.Cfg.Update.IgnoredVersions = append(m.Cfg.Update.IgnoredVersions, tag)
+	return m.Cfg.Save(m.ConfigPath)
+}
+
+// UnignoreVersion 移出忽略列表并持久化。
+func (m *Manager) UnignoreVersion(tag string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.Cfg.Update.IgnoredVersions[:0]
+	for _, t := range m.Cfg.Update.IgnoredVersions {
+		if t != tag {
+			out = append(out, t)
+		}
+	}
+	m.Cfg.Update.IgnoredVersions = out
+	return m.Cfg.Save(m.ConfigPath)
+}
+
+// UpdateSettings 返回自动检查/自动安装设置。
+func (m *Manager) UpdateSettings() (checkEnabled, autoApply bool, intervalHours int) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	iv := m.Cfg.Update.IntervalHours
+	if iv <= 0 {
+		iv = config.DefaultUpdateIntervalHours
+	}
+	return m.Cfg.Update.CheckEnabled, m.Cfg.Update.AutoApply, iv
+}
+
+// SetUpdateAutoApply 开关自动安装并持久化。
+func (m *Manager) SetUpdateAutoApply(on bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Cfg.Update.AutoApply = on
+	return m.Cfg.Save(m.ConfigPath)
+}
+
 // RollbackVersions 列出可回退版本。
 func (m *Manager) RollbackVersions() []string {
 	if m.Updater == nil {
