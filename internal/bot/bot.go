@@ -845,7 +845,7 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 			if e.Probe1h.Count == 0 {
 				continue
 			}
-			probe[e.Name] = fmt.Sprintf("%s %dms", rateIcon(e.Probe1h.FailRate()), e.Probe1h.AvgMS)
+			probe[e.Name] = fmt.Sprintf("%s %s", rateIcon(e.Probe1h.FailRate()), e.Probe1h.Avg())
 		}
 	}
 
@@ -922,10 +922,10 @@ func (b *Bot) showEgressInfo(ctx context.Context, v view, name string) {
 				continue
 			}
 			if e.Probe1h.Count > 0 {
-				fmt.Fprintf(&sb, "\n<b>近 1 小时</b>\n<blockquote>%s 探测 均 <b>%dms</b> · p95 <b>%dms</b> · 失败 <b>%d</b>/%d",
-					rateIcon(e.Probe1h.FailRate()), e.Probe1h.AvgMS, e.Probe1h.P95MS, e.Probe1h.Fail, e.Probe1h.Count)
+				fmt.Fprintf(&sb, "\n<b>近 1 小时</b>\n<blockquote>%s %s 均 <b>%s</b> · p95 <b>%s</b> · 失败 <b>%d</b>/%d",
+					rateIcon(e.Probe1h.FailRate()), e.Kind.Label(), e.Probe1h.Avg(), e.Probe1h.P95(), e.Probe1h.Fail, e.Probe1h.Count)
 				if e.Fw1h.Count > 0 {
-					fmt.Fprintf(&sb, "\n转发 <b>%d</b> 次 · 失败 <b>%d</b>", e.Fw1h.Count, e.Fw1h.Fail)
+					fmt.Fprintf(&sb, "\n转发 <b>%d</b> 次 · 均 <b>%s</b> · 失败 <b>%d</b>", e.Fw1h.Count, e.Fw1h.Avg(), e.Fw1h.Fail)
 				}
 				if e.UpBytes > 0 || e.DownBytes > 0 {
 					fmt.Fprintf(&sb, "\n流量 ↑ <b>%s</b> · ↓ <b>%s</b>", humanBytes(e.UpBytes), humanBytes(e.DownBytes))

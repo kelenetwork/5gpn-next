@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kelenetwork/5gpn-next/internal/monitor"
+
 	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
 )
@@ -210,14 +212,22 @@ func (p *Panel) apiHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sys := p.Manager.SysHealthNow()
+	// 耗时统一以微秒返回，并附带已格式化文本：本机桥探测是几十微秒，
+	// 毫秒精度会全部塌成 0，面板上看起来像监控坏了。
 	type win struct {
-		Count int   `json:"count"`
-		Fail  int   `json:"fail"`
-		AvgMS int64 `json:"avg_ms"`
-		P95MS int64 `json:"p95_ms"`
+		Count  int    `json:"count"`
+		Fail   int    `json:"fail"`
+		AvgUS  int64  `json:"avg_us"`
+		P95US  int64  `json:"p95_us"`
+		AvgTxt string `json:"avg"`
+		P95Txt string `json:"p95"`
+	}
+	mkWin := func(x monitor.Window) win {
+		return win{x.Count, x.Fail, x.AvgUS, x.P95US, x.Avg(), x.P95()}
 	}
 	type eg struct {
 		Name    string `json:"name"`
+		Kind    string `json:"probe_kind"`
 		Probe1h win    `json:"probe_1h"`
 		Fw1h    win    `json:"fw_1h"`
 		Up      int64  `json:"up_bytes"`
@@ -227,18 +237,20 @@ func (p *Panel) apiHealth(w http.ResponseWriter, r *http.Request) {
 	for _, e := range h.Egress {
 		egs = append(egs, eg{
 			Name:    e.Name,
-			Probe1h: win{e.Probe1h.Count, e.Probe1h.Fail, e.Probe1h.AvgMS, e.Probe1h.P95MS},
-			Fw1h:    win{e.Fw1h.Count, e.Fw1h.Fail, e.Fw1h.AvgMS, e.Fw1h.P95MS},
+			Kind:    e.Kind.Label(),
+			Probe1h: mkWin(e.Probe1h),
+			Fw1h:    mkWin(e.Fw1h),
 			Up:      e.UpBytes,
 			Down:    e.DownBytes,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled": true,
-		"egress":  egs,
-		"dns_1h":  win{h.DNS1h.Count, h.DNS1h.Fail, h.DNS1h.AvgMS, h.DNS1h.P95MS},
-		"tcp":     map[string]int{"active": h.TCPActive, "max": h.TCPMax},
-		"quic":    map[string]int{"active": h.QUICActive, "max": h.QUICMax},
+		"enabled":      true,
+		"egress":       egs,
+		"probe_target": h.ProbeTarget,
+		"dns_1h":       mkWin(h.DNS1h),
+		"tcp":          map[string]int{"active": h.TCPActive, "max": h.TCPMax},
+		"quic":         map[string]int{"active": h.QUICActive, "max": h.QUICMax},
 		"sys": map[string]any{
 			"memory_mb":  sys.MemoryMB,
 			"goroutines": sys.Goroutines,

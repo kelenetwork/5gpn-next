@@ -460,10 +460,10 @@ function renderHealth(h) {
     left.appendChild(el('strong', '', healthDot(e.probe_1h.fail, e.probe_1h.count) + ' ' + e.name));
     const bits = [];
     if (e.probe_1h.count) {
-      bits.push('探测 均 ' + e.probe_1h.avg_ms + 'ms · p95 ' + e.probe_1h.p95_ms + 'ms · 失败 ' + e.probe_1h.fail + '/' + e.probe_1h.count);
+      bits.push((e.probe_kind || '探测') + ' 均 ' + e.probe_1h.avg + ' · p95 ' + e.probe_1h.p95 + ' · 失败 ' + e.probe_1h.fail + '/' + e.probe_1h.count);
     }
     if (e.fw_1h.count) {
-      bits.push('转发 ' + e.fw_1h.count + ' 次 · 失败 ' + e.fw_1h.fail);
+      bits.push('转发 ' + e.fw_1h.count + ' 次 · 均 ' + e.fw_1h.avg + ' · 失败 ' + e.fw_1h.fail);
     }
     if (e.up_bytes || e.down_bytes) {
       bits.push('↑ ' + fmtBytes(e.up_bytes) + ' · ↓ ' + fmtBytes(e.down_bytes));
@@ -473,7 +473,7 @@ function renderHealth(h) {
     list.appendChild(row);
   }
   const stats = [
-    ['DNS 1h', h.dns_1h.count ? ('均 ' + h.dns_1h.avg_ms + 'ms / 失败 ' + h.dns_1h.fail) : '无查询'],
+    ['DNS 1h', h.dns_1h.count ? ('均 ' + h.dns_1h.avg + ' / 失败 ' + h.dns_1h.fail) : '无查询'],
     ['TCP 会话', h.tcp.active + ' / ' + h.tcp.max],
     ['QUIC 会话', h.quic.max ? (h.quic.active + ' / ' + h.quic.max) : '未启用'],
     ['内存', (h.sys.memory_mb || 0).toFixed(1) + ' MB'],

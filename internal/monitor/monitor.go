@@ -38,22 +38,70 @@ const (
 	// SaveInterval 是聚合快照落盘周期。升级/重启恰恰是最想回看历史的
 	// 时刻，纯内存缓冲一重启就清零；周期落盘让数据跨重启存活。
 	SaveInterval = 10 * time.Minute
+
+	// DefaultProbeRemote 是端到端探测的远端目标。
+	//
+	// 选它的理由：任播地址，全球各出口都能就近命中，测出来接近该出口
+	// 的真实网络质量；不解析域名，避免把 DNS 故障算进链路延迟；
+	// 且是公共 DNS 的 DoT 端口，每分钟一次 TLS 握手对其毫无压力。
+	DefaultProbeRemote = "1.1.1.1:853"
 )
+
+// ProbeKind 说明一次探测到底测了什么。
+//
+// 存在理由：同样叫「探测 xx ms」，测本机 loopback 和测跨国链路完全是
+// 两回事。早期版本对 SOCKS5 出口只在本机桥上握手，面板上四条出口
+// 齐刷刷显示 0ms，用户合理地以为监控坏了——指标必须自带语义。
+type ProbeKind uint8
+
+const (
+	// ProbeKindUnknown 用于历史快照恢复出的样本：重启后首轮探测完成前
+	// 无法断定当时测的是什么，标签保持中性。
+	ProbeKindUnknown ProbeKind = iota
+	// ProbeKindBridge 只对本机 SOCKS5 桥做版本协商：证明 mihomo 活着，
+	// 耗时是 loopback 级别，不代表任何链路延迟。
+	ProbeKindBridge
+	// ProbeKindNode 直接 TCP 建连节点服务器：网关到节点的单程 RTT。
+	ProbeKindNode
+	// ProbeKindEndToEnd 经出口 CONNECT 到远端目标并完成 TLS 握手：
+	// 真正的端到端往返。
+	ProbeKindEndToEnd
+)
+
+// Label 是面板上的短标签。
+func (k ProbeKind) Label() string {
+	switch k {
+	case ProbeKindBridge:
+		return "桥"
+	case ProbeKindNode:
+		return "节点"
+	case ProbeKindEndToEnd:
+		return "链路"
+	}
+	return "探测"
+}
 
 // Target 是一个可探测的出口端点。
 type Target struct {
 	Name string
-	Addr string // host:port
-	// Socks5 为 true 时探测做真实 SOCKS5 版本协商而不止 TCP 建连，
-	// 更接近用户流量的真实可用性。
+	Addr string // host:port；SOCKS5 出口填本机桥地址
+	// Socks5 为 true 时探测走 SOCKS5 协议而不止裸 TCP 建连。
 	Socks5 bool
+	// Remote 非空时（需 Socks5），探测经出口 CONNECT 到该目标并做一次
+	// TLS 握手，计时只取握手往返——这才是用户关心的出口延迟。
+	Remote string
+	// Kind 标注本次探测的语义，供面板如实展示。
+	Kind ProbeKind
 }
 
 // Sample 是一次采样结果。
+//
+// 耗时用微秒存储：本机桥握手只要几十微秒，毫秒精度会全部截断成 0，
+// 面板上看起来就像监控坏了。
 type Sample struct {
-	At time.Time
-	MS int64
-	OK bool
+	At time.Time `json:"At"`
+	US int64     `json:"us"`
+	OK bool      `json:"OK"`
 }
 
 // ring 是固定容量环形缓冲。非并发安全，由 Monitor 的锁保护。
@@ -94,14 +142,36 @@ func (r *ring) since(t time.Time) []Sample {
 	return out
 }
 
-// Window 是一段时间窗口内的聚合。
+// Window 是一段时间窗口内的聚合。耗时字段统一为微秒。
 type Window struct {
 	Count      int
 	Fail       int
-	AvgMS      int64
-	P95MS      int64
-	MaxMS      int64
+	AvgUS      int64
+	P95US      int64
+	MaxUS      int64
 	LastFailAt time.Time
+}
+
+// Avg / P95 / Max 返回人类可读耗时。
+func (w Window) Avg() string { return FormatUS(w.AvgUS) }
+func (w Window) P95() string { return FormatUS(w.P95US) }
+func (w Window) Max() string { return FormatUS(w.MaxUS) }
+
+// FormatUS 把微秒格式化成带单位的字符串。
+//
+// 亚毫秒区间保留一位小数并对极小值收敛为 "<0.1ms"：显示 "0ms" 会被
+// 当成故障，显示 "0.043ms" 又是无意义的精度。
+func FormatUS(us int64) string {
+	switch {
+	case us <= 0:
+		return "0ms"
+	case us < 100:
+		return "<0.1ms"
+	case us < 10_000:
+		return fmt.Sprintf("%.1fms", float64(us)/1000)
+	default:
+		return fmt.Sprintf("%dms", (us+500)/1000)
+	}
 }
 
 // FailRate 返回失败率（0~1）。
@@ -125,20 +195,20 @@ func summarize(ss []Sample) Window {
 			}
 			continue
 		}
-		sum += s.MS
-		lat = append(lat, s.MS)
-		if s.MS > w.MaxMS {
-			w.MaxMS = s.MS
+		sum += s.US
+		lat = append(lat, s.US)
+		if s.US > w.MaxUS {
+			w.MaxUS = s.US
 		}
 	}
 	if len(lat) > 0 {
-		w.AvgMS = sum / int64(len(lat))
+		w.AvgUS = sum / int64(len(lat))
 		sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
 		idx := len(lat) * 95 / 100
 		if idx >= len(lat) {
 			idx = len(lat) - 1
 		}
-		w.P95MS = lat[idx]
+		w.P95US = lat[idx]
 	}
 	return w
 }
@@ -159,6 +229,7 @@ type Monitor struct {
 	alerted   map[string]bool
 	lastAlert map[string]time.Time
 	traffic   map[string]*egressBytes
+	kinds     map[string]ProbeKind
 
 	// AlertAfter / AlertCooldown 可由配置覆盖；零值用默认。
 	AlertAfter    int
@@ -166,6 +237,9 @@ type Monitor struct {
 
 	// PersistPath 非空时启用快照落盘与启动恢复。
 	PersistPath string
+
+	// ProbeTarget 是端到端探测的远端目标，仅用于面板文案展示。
+	ProbeTarget string
 
 	// Targets 返回当前可探测的出口列表；配置热重载后自动跟随。
 	Targets func() []Target
@@ -180,7 +254,7 @@ type Monitor struct {
 	Guard func(addr string) error
 
 	now  func() time.Time
-	dial func(ctx context.Context, addr string, socks5 bool) (time.Duration, error)
+	dial func(ctx context.Context, t Target) (time.Duration, error)
 }
 
 // New 构造 Monitor。
@@ -193,8 +267,9 @@ func New() *Monitor {
 		alerted:   make(map[string]bool),
 		lastAlert: make(map[string]time.Time),
 		traffic:   make(map[string]*egressBytes),
+		kinds:     make(map[string]ProbeKind),
 		now:       time.Now,
-		dial: dialProbe,
+		dial:      dialProbe,
 	}
 }
 
@@ -234,14 +309,22 @@ func (m *Monitor) probeOnce(ctx context.Context) {
 				// 目标是网关自身：跳过而不是记失败，这不是链路故障。
 				continue
 			}
+			// 远端探测目标同样过 selfguard：被指向网关自身时降级为
+			// 桥探测，而不是让探测流量参与自连接环路。
+			if tgt.Remote != "" {
+				if err := m.Guard(tgt.Remote); err != nil {
+					tgt.Remote = ""
+					tgt.Kind = ProbeKindBridge
+				}
+			}
 		}
 		wg.Add(1)
 		go func(tgt Target) {
 			defer wg.Done()
 			dctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
-			el, err := m.dial(dctx, tgt.Addr, tgt.Socks5)
-			m.recordProbe(tgt.Name, err == nil, el.Milliseconds())
+			el, err := m.dial(dctx, tgt)
+			m.recordProbe(tgt.Name, err == nil, el.Microseconds(), tgt.Kind)
 		}(tgt)
 	}
 	wg.Wait()
@@ -261,7 +344,7 @@ func (m *Monitor) alertCooldown() time.Duration {
 	return DefaultAlertCooldown
 }
 
-func (m *Monitor) recordProbe(name string, ok bool, ms int64) {
+func (m *Monitor) recordProbe(name string, ok bool, us int64, kind ProbeKind) {
 	now := m.now()
 	var alert string
 	m.mu.Lock()
@@ -270,11 +353,14 @@ func (m *Monitor) recordProbe(name string, ok bool, ms int64) {
 		r = newRing(probeCap)
 		m.probes[name] = r
 	}
-	r.add(Sample{At: now, MS: ms, OK: ok})
+	r.add(Sample{At: now, US: us, OK: ok})
+	if kind != ProbeKindUnknown {
+		m.kinds[name] = kind
+	}
 	if ok {
 		if m.alerted[name] {
 			m.alerted[name] = false
-			alert = fmt.Sprintf("✅ 出口 <b>%s</b> 探测已恢复（%dms）", name, ms)
+			alert = fmt.Sprintf("✅ 出口 <b>%s</b> 探测已恢复（%s）", name, FormatUS(us))
 		}
 		m.consec[name] = 0
 	} else {
@@ -293,8 +379,8 @@ func (m *Monitor) recordProbe(name string, ok bool, ms int64) {
 	}
 }
 
-// RecordForward 记录一次真实转发的拨号结果（TCP 与 QUIC 共用）。
-func (m *Monitor) RecordForward(egress string, ok bool, ms int64) {
+// RecordForward 记录一次真实转发的拨号结果（TCP 与 QUIC 共用），耗时为微秒。
+func (m *Monitor) RecordForward(egress string, ok bool, us int64) {
 	if egress == "" {
 		egress = "DIRECT"
 	}
@@ -304,14 +390,14 @@ func (m *Monitor) RecordForward(egress string, ok bool, ms int64) {
 		r = newRing(fwCap)
 		m.fw[egress] = r
 	}
-	r.add(Sample{At: m.now(), MS: ms, OK: ok})
+	r.add(Sample{At: m.now(), US: us, OK: ok})
 	m.mu.Unlock()
 }
 
-// RecordDNS 记录一次 DoT 上游查询结果。
-func (m *Monitor) RecordDNS(ok bool, ms int64) {
+// RecordDNS 记录一次 DoT 上游查询结果，耗时为微秒。
+func (m *Monitor) RecordDNS(ok bool, us int64) {
 	m.mu.Lock()
-	m.dns.add(Sample{At: m.now(), MS: ms, OK: ok})
+	m.dns.add(Sample{At: m.now(), US: us, OK: ok})
 	m.mu.Unlock()
 }
 
@@ -334,6 +420,7 @@ func (m *Monitor) AddEgressTraffic(egress string, up, down int64) {
 // EgressHealth 是单出口健康汇总。
 type EgressHealth struct {
 	Name      string
+	Kind      ProbeKind
 	Probe1h   Window
 	Probe24h  Window
 	Fw1h      Window
@@ -344,6 +431,7 @@ type EgressHealth struct {
 // Health 是给 Bot / 面板的整体快照。
 type Health struct {
 	Egress              []EgressHealth
+	ProbeTarget         string
 	DNS1h               Window
 	DNS24h              Window
 	TCPActive, TCPMax   int
@@ -378,8 +466,9 @@ func (m *Monitor) Snapshot() Health {
 	}
 	sort.Strings(names)
 	var out Health
+	out.ProbeTarget = m.ProbeTarget
 	for _, n := range names {
-		eh := EgressHealth{Name: n}
+		eh := EgressHealth{Name: n, Kind: m.kinds[n]}
 		if r := m.probes[n]; r != nil {
 			eh.Probe1h = summarize(r.since(h1))
 			eh.Probe24h = summarize(r.since(h24))
@@ -416,15 +505,15 @@ func (m *Monitor) Anomalies(name string, limit int) []Sample {
 		return nil
 	}
 	all := r.all()
-	avg := summarize(all).AvgMS
+	avg := summarize(all).AvgUS
 	slow := avg * 3
-	if slow < 200 {
-		slow = 200
+	if slow < 200_000 {
+		slow = 200_000
 	}
 	var out []Sample
 	for i := len(all) - 1; i >= 0 && len(out) < limit; i-- {
 		s := all[i]
-		if !s.OK || s.MS >= slow {
+		if !s.OK || s.US >= slow {
 			out = append(out, s)
 		}
 	}

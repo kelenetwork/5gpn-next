@@ -327,7 +327,7 @@ func (s *Server) query(req *dns.Msg) (*dns.Msg, error) {
 	if len(s.Upstream) == 1 {
 		resp, _, err := s.client.Exchange(req.Copy(), s.Upstream[0])
 		if s.OnUpstream != nil {
-			s.OnUpstream(err == nil && resp != nil, time.Since(start).Milliseconds())
+			s.OnUpstream(err == nil && resp != nil, time.Since(start).Microseconds())
 		}
 		if err != nil {
 			return nil, err
@@ -351,14 +351,14 @@ func (s *Server) query(req *dns.Msg) (*dns.Msg, error) {
 		r := <-ch
 		if r.err == nil && r.resp != nil {
 			if s.OnUpstream != nil {
-				s.OnUpstream(true, time.Since(start).Milliseconds())
+				s.OnUpstream(true, time.Since(start).Microseconds())
 			}
 			return r.resp, nil
 		}
 		lastErr = r.err
 	}
 	if s.OnUpstream != nil {
-		s.OnUpstream(false, time.Since(start).Milliseconds())
+		s.OnUpstream(false, time.Since(start).Microseconds())
 	}
 	return nil, lastErr
 }

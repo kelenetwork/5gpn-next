@@ -30,20 +30,25 @@ func (b *Bot) showHealth(ctx context.Context, v view) {
 		for _, e := range h.Egress {
 			sb.WriteString(egressHealthLine(e))
 		}
-		sb.WriteString("<i>探测＝到出口节点的 TCP 建连；转发＝真实用户流量拨号</i>\n\n")
+		target := h.ProbeTarget
+		if target == "" {
+			target = "远端目标"
+		}
+		fmt.Fprintf(&sb, "<i>链路＝经出口到 %s 的 TLS 握手往返；节点＝到节点 TCP；桥＝本机代理存活；转发＝真实用户流量</i>\n\n",
+			html.EscapeString(target))
 	}
 
 	// ---- DoT ----
 	sb.WriteString("<b>DNS（DoT 上游）</b>\n<blockquote>")
 	if h.DNS1h.Count > 0 {
-		fmt.Fprintf(&sb, "%s 1h　均 <b>%dms</b> · p95 <b>%dms</b> · 失败 <b>%d</b>/%d",
-			rateIcon(h.DNS1h.FailRate()), h.DNS1h.AvgMS, h.DNS1h.P95MS, h.DNS1h.Fail, h.DNS1h.Count)
+		fmt.Fprintf(&sb, "%s 1h　均 <b>%s</b> · p95 <b>%s</b> · 失败 <b>%d</b>/%d",
+			rateIcon(h.DNS1h.FailRate()), h.DNS1h.Avg(), h.DNS1h.P95(), h.DNS1h.Fail, h.DNS1h.Count)
 	} else {
 		sb.WriteString("1h 内无上游查询（缓存命中或无流量）")
 	}
 	if h.DNS24h.Count > 0 {
-		fmt.Fprintf(&sb, "\n🕐 24h　均 <b>%dms</b> · p95 <b>%dms</b> · 失败 <b>%d</b>/%d",
-			h.DNS24h.AvgMS, h.DNS24h.P95MS, h.DNS24h.Fail, h.DNS24h.Count)
+		fmt.Fprintf(&sb, "\n🕐 24h　均 <b>%s</b> · p95 <b>%s</b> · 失败 <b>%d</b>/%d",
+			h.DNS24h.Avg(), h.DNS24h.P95(), h.DNS24h.Fail, h.DNS24h.Count)
 	}
 	sb.WriteString("</blockquote>\n")
 
@@ -95,25 +100,26 @@ func egressHealthLine(e monitor.EgressHealth) string {
 	}
 	fmt.Fprintf(&sb, "%s <b>%s</b>\n<blockquote>", icon, html.EscapeString(e.Name))
 	wrote := false
+	label := e.Kind.Label()
 	if e.Probe1h.Count > 0 {
-		fmt.Fprintf(&sb, "探测 1h　均 <b>%dms</b> · p95 <b>%dms</b> · 失败 <b>%d</b>/%d",
-			e.Probe1h.AvgMS, e.Probe1h.P95MS, e.Probe1h.Fail, e.Probe1h.Count)
+		fmt.Fprintf(&sb, "%s 1h　均 <b>%s</b> · p95 <b>%s</b> · 失败 <b>%d</b>/%d",
+			label, e.Probe1h.Avg(), e.Probe1h.P95(), e.Probe1h.Fail, e.Probe1h.Count)
 		wrote = true
 	}
 	if e.Probe24h.Count > 0 && e.Probe24h.Count != e.Probe1h.Count {
 		if wrote {
 			sb.WriteString("\n")
 		}
-		fmt.Fprintf(&sb, "探测 24h　均 <b>%dms</b> · p95 <b>%dms</b> · 失败 <b>%d</b>/%d",
-			e.Probe24h.AvgMS, e.Probe24h.P95MS, e.Probe24h.Fail, e.Probe24h.Count)
+		fmt.Fprintf(&sb, "%s 24h　均 <b>%s</b> · p95 <b>%s</b> · 失败 <b>%d</b>/%d",
+			label, e.Probe24h.Avg(), e.Probe24h.P95(), e.Probe24h.Fail, e.Probe24h.Count)
 		wrote = true
 	}
 	if e.Fw1h.Count > 0 {
 		if wrote {
 			sb.WriteString("\n")
 		}
-		fmt.Fprintf(&sb, "转发 1h　<b>%d</b> 次 · 失败 <b>%d</b>（%.0f%%）",
-			e.Fw1h.Count, e.Fw1h.Fail, e.Fw1h.FailRate()*100)
+		fmt.Fprintf(&sb, "转发 1h　<b>%d</b> 次 · 均 <b>%s</b> · 失败 <b>%d</b>（%.0f%%）",
+			e.Fw1h.Count, e.Fw1h.Avg(), e.Fw1h.Fail, e.Fw1h.FailRate()*100)
 		wrote = true
 	}
 	if e.UpBytes > 0 || e.DownBytes > 0 {
@@ -150,7 +156,7 @@ func (b *Bot) showHealthDetail(ctx context.Context, v view, name string) {
 				sb.WriteString("\n")
 			}
 			if s.OK {
-				fmt.Fprintf(&sb, "🐢 %s　<b>%dms</b>（慢）", s.At.Local().Format("01-02 15:04"), s.MS)
+				fmt.Fprintf(&sb, "🐢 %s　<b>%s</b>（慢）", s.At.Local().Format("01-02 15:04"), monitor.FormatUS(s.US))
 			} else {
 				fmt.Fprintf(&sb, "❌ %s　<b>失败</b>", s.At.Local().Format("01-02 15:04"))
 			}

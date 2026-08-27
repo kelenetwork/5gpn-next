@@ -72,7 +72,7 @@ type Server struct {
 	// 避免宿主 INPUT 默认放行时退化成公网开放代理。
 	ClientCIDR netip.Prefix
 
-	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。
+	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。耗时为微秒。
 	OnDial func(egress string, ok bool, ms int64)
 
 	// OnEgressTraffic 按出口维度累计真实转发字节数（可为空）。
@@ -264,7 +264,7 @@ func (s *Server) handle(ctx context.Context, cli net.Conn, isTLS bool) {
 	dialStart := time.Now()
 	up, err := dialer.DialContext(dctx, "tcp", target)
 	if s.OnDial != nil {
-		s.OnDial(dialer.Name(), err == nil, time.Since(dialStart).Milliseconds())
+		s.OnDial(dialer.Name(), err == nil, time.Since(dialStart).Microseconds())
 	}
 	if err != nil {
 		s.Failed.Add(1)

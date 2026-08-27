@@ -335,17 +335,29 @@ func cmdRun(args []string) error {
 	if a.cfg.Monitor.AlertCooldownMinutes > 0 {
 		health.AlertCooldown = time.Duration(a.cfg.Monitor.AlertCooldownMinutes) * time.Minute
 	}
+	health.ProbeTarget = monitor.DefaultProbeRemote
 	health.Targets = func() []monitor.Target {
 		var out []monitor.Target
 		for _, e := range a.cfg.Egress {
 			if e.Addr != "" && e.Type == "socks5" {
-				// 优先探测本机 mihomo 桥（真实 SOCKS5 协商）：这才是
-				// 用户流量真正走的入口；节点端口只测 TCP 可达。
-				out = append(out, monitor.Target{Name: e.Name, Addr: e.Addr, Socks5: true})
+				// 经本机 mihomo 桥 CONNECT 到远端并完成 TLS 握手：只跟桥
+				// 握手测到的是 loopback 往返（几十微秒），面板上一排 0ms
+				// 看着像监控坏了，实际什么链路信息都没有。
+				out = append(out, monitor.Target{
+					Name:   e.Name,
+					Addr:   e.Addr,
+					Socks5: true,
+					Remote: monitor.DefaultProbeRemote,
+					Kind:   monitor.ProbeKindEndToEnd,
+				})
 				continue
 			}
 			if e.Server != "" {
-				out = append(out, monitor.Target{Name: e.Name, Addr: e.Server})
+				out = append(out, monitor.Target{
+					Name: e.Name,
+					Addr: e.Server,
+					Kind: monitor.ProbeKindNode,
+				})
 			}
 		}
 		return out

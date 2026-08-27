@@ -6,6 +6,30 @@ import (
 	"time"
 )
 
+// UnmarshalJSON 兼容 v0.13.20 及更早版本的毫秒快照。
+//
+// 老快照里字段名是 MS（毫秒）；直接改字段会让升级后的第一天历史
+// 全部变成 0，看起来像监控炸了。缺 us 时按毫秒换算补上。
+func (s *Sample) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		At time.Time `json:"At"`
+		US *int64    `json:"us"`
+		MS *int64    `json:"MS"`
+		OK bool      `json:"OK"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	s.At, s.OK = raw.At, raw.OK
+	switch {
+	case raw.US != nil:
+		s.US = *raw.US
+	case raw.MS != nil:
+		s.US = *raw.MS * 1000
+	}
+	return nil
+}
+
 // persisted 是落盘快照格式。只存样本原始数据，聚合在读取时重算。
 type persisted struct {
 	SavedAt time.Time               `json:"saved_at"`

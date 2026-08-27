@@ -87,7 +87,7 @@ type Server struct {
 	NoHost  atomic.Int64 // 无法还原目的地而丢弃的会话数
 	Failed  atomic.Int64 // 策略/出口/拨号失败的会话数
 
-	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。
+	// OnDial 在每次出口拨号完成后回调（可为空），供健康监控埋点。耗时为微秒。
 	OnDial func(egress string, ok bool, ms int64)
 
 	// OnEgressTraffic 按出口维度累计真实转发字节数（可为空）。
@@ -357,7 +357,7 @@ func (sc *session) connect(ctx context.Context, pc net.PacketConn, host string) 
 	dialStart := time.Now()
 	remote, err := egress.DialUDPVia(dialCtx, d, target)
 	if sc.srv.OnDial != nil {
-		sc.srv.OnDial(d.Name(), err == nil, time.Since(dialStart).Milliseconds())
+		sc.srv.OnDial(d.Name(), err == nil, time.Since(dialStart).Microseconds())
 	}
 	if err != nil {
 		sc.tr.Fail(trace.StageConnect, err, "QUIC 出口拨号 %s 失败", target)
