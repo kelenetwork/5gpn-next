@@ -159,14 +159,18 @@ func (w Window) Max() string { return FormatUS(w.MaxUS) }
 
 // FormatUS 把微秒格式化成带单位的字符串。
 //
-// 亚毫秒区间保留一位小数并对极小值收敛为 "<0.1ms"：显示 "0ms" 会被
-// 当成故障，显示 "0.043ms" 又是无意义的精度。
+// 亚毫秒区间保留一位小数并对极小值收敛：显示 "0ms" 会被当成故障，
+// 显示 "0.043ms" 又是无意义的精度。
+//
+// 用 "≤" 而不是 "<"：返回值会被直接拼进 Bot 的 HTML 消息，裸 "<" 会被
+// Telegram 当成标签起始并返回 400，整页发不出去——v0.13.21 实测踩坑，
+// 现象是「健康监控点了没反应」且无任何错误提示。
 func FormatUS(us int64) string {
 	switch {
 	case us <= 0:
 		return "0ms"
 	case us < 100:
-		return "<0.1ms"
+		return "≤0.1ms"
 	case us < 10_000:
 		return fmt.Sprintf("%.1fms", float64(us)/1000)
 	default:

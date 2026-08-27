@@ -52,8 +52,8 @@ func TestFormatUSKeepsSubMillisecondVisible(t *testing.T) {
 		want string
 	}{
 		{0, "0ms"},
-		{40, "<0.1ms"},   // 本机 SOCKS5 桥的真实量级
-		{99, "<0.1ms"},
+		{40, "≤0.1ms"},   // 本机 SOCKS5 桥的真实量级
+		{99, "≤0.1ms"},
 		{100, "0.1ms"},
 		{432, "0.4ms"},
 		{1500, "1.5ms"},
@@ -114,8 +114,8 @@ func TestSnapshotCarriesProbeKind(t *testing.T) {
 	if got := byName["local"].Kind; got != ProbeKindBridge {
 		t.Fatalf("local kind=%v", got)
 	}
-	if got := byName["local"].Probe1h.Avg(); got != "<0.1ms" {
-		t.Fatalf("local avg=%q want <0.1ms（不能再显示 0ms）", got)
+	if got := byName["local"].Probe1h.Avg(); got != "≤0.1ms" {
+		t.Fatalf("local avg=%q want ≤0.1ms（不能再显示 0ms）", got)
 	}
 }
 
