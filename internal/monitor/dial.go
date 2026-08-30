@@ -1,11 +1,14 @@
 package monitor
 
 import (
+	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 )
 
@@ -16,15 +19,16 @@ import (
 //   - 裸 TCP 建连：非 SOCKS5 出口直接连节点服务器，测网关到节点的 RTT。
 //   - SOCKS5 版本协商：只跟本机 mihomo 桥握手，证明代理进程活着。
 //     耗时是 loopback 级别（几十微秒），不代表任何链路延迟。
-//   - 端到端：经 mihomo CONNECT 到远端目标并完成 TLS 握手，计时只取
-//     握手往返——这才是用户关心的「走这条出口有多快」。
+//   - 端到端：经 mihomo CONNECT 到远端目标并完成 HTTP GET，计时只取
+//     请求往返——这才是用户关心的「走这条出口有多快」。
 //
-// 为什么端到端要做 TLS 而不止 CONNECT：mihomo 会先乐观回复 CONNECT 成功
-// 再去连上游，上游不可达时 CONNECT 照样返回 0x00。只有真正收到对端的
-// ServerHello，才能证明整条链路通且拿到真实往返时间。
+// 为什么端到端要做 HTTP 而不止 CONNECT：mihomo 会先乐观回复 CONNECT
+// 成功再去连上游，上游不可达时 CONNECT 照样返回 0x00。必须读到 HTTP
+// 响应，才能证明整条链路通且拿到真实往返时间。目标对齐 Bot「测试连通」
+// （cp.cloudflare.com /generate_204），避免把 DoT 不通误报成出口掉线。
 func dialProbe(ctx context.Context, t Target) (time.Duration, error) {
 	if t.Socks5 && t.Remote != "" {
-		return dialEndToEnd(ctx, t.Addr, t.Remote)
+		return dialEndToEnd(ctx, t.Addr, t.Remote, t.Path)
 	}
 
 	d := net.Dialer{}
@@ -53,11 +57,11 @@ func dialProbe(ctx context.Context, t Target) (time.Duration, error) {
 	return time.Since(start), nil
 }
 
-// dialEndToEnd 经本机 SOCKS5 桥连到 remote 并完成 TLS 握手。
+// dialEndToEnd 经本机 SOCKS5 桥连到 remote 并完成一次 HTTP GET。
 //
 // 计时从 CONNECT 发出前开始：建到本机桥的那一小段（几十微秒）相对
-// 跨境往返可以忽略，但 CONNECT 与 TLS 必须整体计入，否则测不到真实链路。
-func dialEndToEnd(ctx context.Context, bridge, remote string) (time.Duration, error) {
+// 跨境往返可以忽略，但 CONNECT 与 HTTP 必须整体计入，否则测不到真实链路。
+func dialEndToEnd(ctx context.Context, bridge, remote, path string) (time.Duration, error) {
 	host, portStr, err := net.SplitHostPort(remote)
 	if err != nil {
 		return 0, fmt.Errorf("探测目标 %q 格式错误: %w", remote, err)
@@ -65,6 +69,12 @@ func dialEndToEnd(ctx context.Context, bridge, remote string) (time.Duration, er
 	port, err := net.LookupPort("tcp", portStr)
 	if err != nil {
 		return 0, fmt.Errorf("探测目标端口 %q 无效: %w", portStr, err)
+	}
+	if path == "" {
+		path = DefaultProbePath
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
 	}
 
 	var d net.Dialer
@@ -81,19 +91,22 @@ func dialEndToEnd(ctx context.Context, bridge, remote string) (time.Duration, er
 	if err := socks5Connect(c, host, port); err != nil {
 		return time.Since(start), err
 	}
-	// TLS 握手：只验证握手能完成，不校验证书链。
-	// 探测目标是我们自己选的固定 IP，此处不承载任何数据，
-	// 校验失败率反而会把链路问题误报成安全问题。
-	tc := tls.Client(c, &tls.Config{
-		InsecureSkipVerify: true, // #nosec G402 — 仅用于测量握手往返，不传输数据
-		ServerName:         host,
-	})
-	if err := tc.HandshakeContext(ctx); err != nil {
-		return time.Since(start), fmt.Errorf("TLS 握手失败: %w", err)
+	// HTTP 往返：只验证能读到合法响应。CONNECT 成功不够——mihomo 会
+	// 乐观回包；DoT TLS 也不再用，避免把网页通、853 不通误报成掉线。
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host)
+	if _, err := io.WriteString(c, req); err != nil {
+		return time.Since(start), fmt.Errorf("HTTP 请求失败: %w", err)
 	}
-	el := time.Since(start)
-	_ = tc.Close()
-	return el, nil
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		return time.Since(start), fmt.Errorf("读取 HTTP 响应失败: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return time.Since(start), fmt.Errorf("HTTP 状态异常: %d", resp.StatusCode)
+	}
+	return time.Since(start), nil
 }
 
 // socks5Connect 执行无认证 SOCKS5 方法协商 + CONNECT。

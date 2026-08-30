@@ -34,7 +34,7 @@ func (b *Bot) showHealth(ctx context.Context, v view) {
 		if target == "" {
 			target = "远端目标"
 		}
-		fmt.Fprintf(&sb, "<i>链路＝经出口到 %s 的 TLS 握手往返；节点＝到节点 TCP；桥＝本机代理存活；转发＝真实用户流量</i>\n\n",
+		fmt.Fprintf(&sb, "<i>链路＝经出口到 %s 的 HTTP 探测往返；节点＝到节点 TCP；桥＝本机代理存活；转发＝真实用户流量</i>\n\n",
 			html.EscapeString(target))
 	}
 

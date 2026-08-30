@@ -1,16 +1,12 @@
 package monitor
 
 import (
+	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/binary"
 	"io"
-	"math/big"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -101,27 +97,13 @@ func itoa(v uint16) string {
 	return string(b[i:])
 }
 
-// fakeTLS 起一个自签 TLS 服务端，模拟远端探测目标（如 1.1.1.1:853）。
-func fakeTLS(t *testing.T) string {
+// fakeHTTP 起一个连通性探针 HTTP 服务端，模拟 cp.cloudflare.com /generate_204。
+func fakeHTTP(t *testing.T, statusLine string) string {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
+	if statusLine == "" {
+		statusLine = "HTTP/1.1 204 No Content"
 	}
-	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "probe-test"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
-		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
-	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,8 +116,11 @@ func fakeTLS(t *testing.T) string {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
-				_ = c.(*tls.Conn).Handshake()
-				time.Sleep(50 * time.Millisecond)
+				br := bufio.NewReader(c)
+				if _, err := http.ReadRequest(br); err != nil {
+					return
+				}
+				_, _ = io.WriteString(c, statusLine+"\r\nConnection: close\r\n\r\n")
 			}(c)
 		}
 	}()
@@ -146,13 +131,13 @@ func fakeTLS(t *testing.T) string {
 func TestDialProbeEndToEndMeasuresRealPath(t *testing.T) {
 	const upstreamDelay = 60 * time.Millisecond
 	bridge := fakeSocks5(t, upstreamDelay)
-	remote := fakeTLS(t)
+	remote := fakeHTTP(t, "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	d, err := dialProbe(ctx, Target{
-		Addr: bridge, Socks5: true, Remote: remote, Kind: ProbeKindEndToEnd,
+		Addr: bridge, Socks5: true, Remote: remote, Path: DefaultProbePath, Kind: ProbeKindEndToEnd,
 	})
 	if err != nil {
 		t.Fatalf("端到端探测失败: %v", err)
@@ -204,6 +189,21 @@ func TestDialProbeEndToEndFailsWhenRemoteDown(t *testing.T) {
 		Addr: bridge, Socks5: true, Remote: dead, Kind: ProbeKindEndToEnd,
 	}); err == nil {
 		t.Fatal("远端不可达时探测必须失败")
+	}
+}
+
+// HTTP 4xx/5xx 必须记失败：CONNECT 通了但应用层不通，不能当做出口正常。
+func TestDialProbeEndToEndFailsOnHTTPError(t *testing.T) {
+	bridge := fakeSocks5(t, 0)
+	remote := fakeHTTP(t, "HTTP/1.1 502 Bad Gateway")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := dialProbe(ctx, Target{
+		Addr: bridge, Socks5: true, Remote: remote, Path: DefaultProbePath, Kind: ProbeKindEndToEnd,
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 状态异常") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

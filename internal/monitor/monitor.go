@@ -40,11 +40,16 @@ const (
 	SaveInterval = 10 * time.Minute
 
 	// DefaultProbeRemote 是端到端探测的远端目标。
+	// DefaultProbePath 是对该目标发出的 HTTP 路径。
 	//
-	// 选它的理由：任播地址，全球各出口都能就近命中，测出来接近该出口
-	// 的真实网络质量；不解析域名，避免把 DNS 故障算进链路延迟；
-	// 且是公共 DNS 的 DoT 端口，每分钟一次 TLS 握手对其毫无压力。
-	DefaultProbeRemote = "1.1.1.1:853"
+	// 必须和 Bot「测试连通」走同一类目标：经出口 CONNECT 后再做一次
+	// 真实 HTTP 往返。旧目标 1.1.1.1:853（DoT TLS）会把「网页通、DoT
+	// 不通」的出口（典型是日本 SoftBank）误报成掉线——面板红点 0ms，
+	// 手动测试却是 40ms 成功。cp.cloudflare.com /generate_204 是连通性
+	// 探针，任播、无内容、对端无压力；CONNECT 成功不够，mihomo 会乐观
+	// 回包，必须读到 HTTP 响应才算通。
+	DefaultProbeRemote = "cp.cloudflare.com:80"
+	DefaultProbePath   = "/generate_204"
 )
 
 // ProbeKind 说明一次探测到底测了什么。
@@ -63,7 +68,7 @@ const (
 	ProbeKindBridge
 	// ProbeKindNode 直接 TCP 建连节点服务器：网关到节点的单程 RTT。
 	ProbeKindNode
-	// ProbeKindEndToEnd 经出口 CONNECT 到远端目标并完成 TLS 握手：
+	// ProbeKindEndToEnd 经出口 CONNECT 到远端目标并完成 HTTP 探测：
 	// 真正的端到端往返。
 	ProbeKindEndToEnd
 )
@@ -88,8 +93,10 @@ type Target struct {
 	// Socks5 为 true 时探测走 SOCKS5 协议而不止裸 TCP 建连。
 	Socks5 bool
 	// Remote 非空时（需 Socks5），探测经出口 CONNECT 到该目标并做一次
-	// TLS 握手，计时只取握手往返——这才是用户关心的出口延迟。
+	// HTTP GET，计时只取请求往返——这才是用户关心的出口延迟。
 	Remote string
+	// Path 是 HTTP 探测路径；空则用 DefaultProbePath。
+	Path string
 	// Kind 标注本次探测的语义，供面板如实展示。
 	Kind ProbeKind
 }

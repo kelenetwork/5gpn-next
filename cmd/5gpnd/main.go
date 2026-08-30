@@ -340,14 +340,16 @@ func cmdRun(args []string) error {
 		var out []monitor.Target
 		for _, e := range a.cfg.Egress {
 			if e.Addr != "" && e.Type == "socks5" {
-				// 经本机 mihomo 桥 CONNECT 到远端并完成 TLS 握手：只跟桥
-				// 握手测到的是 loopback 往返（几十微秒），面板上一排 0ms
-				// 看着像监控坏了，实际什么链路信息都没有。
+				// 经本机 mihomo 桥 CONNECT 后再做 HTTP 探测：只跟桥握手
+				// 测到的是 loopback 往返（几十微秒），面板上一排 0ms
+				// 看着像监控坏了。目标与 Bot「测试连通」对齐，避免把
+				// DoT 不通误报成出口掉线。
 				out = append(out, monitor.Target{
 					Name:   e.Name,
 					Addr:   e.Addr,
 					Socks5: true,
 					Remote: monitor.DefaultProbeRemote,
+					Path:   monitor.DefaultProbePath,
 					Kind:   monitor.ProbeKindEndToEnd,
 				})
 				continue
