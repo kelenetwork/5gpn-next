@@ -52,7 +52,7 @@ func TestFormatUSKeepsSubMillisecondVisible(t *testing.T) {
 		want string
 	}{
 		{0, "0ms"},
-		{40, "≤0.1ms"},   // 本机 SOCKS5 桥的真实量级
+		{40, "≤0.1ms"}, // 本机 SOCKS5 桥的真实量级
 		{99, "≤0.1ms"},
 		{100, "0.1ms"},
 		{432, "0.4ms"},
@@ -257,5 +257,37 @@ func TestSampleUnmarshalAcceptsLegacyMilliseconds(t *testing.T) {
 	}
 	if back.US != cur.US || back.OK != cur.OK {
 		t.Fatalf("round trip 丢失: %+v vs %+v", back, cur)
+	}
+}
+
+func TestForgetEgressDropsSnapshotAndPersist(t *testing.T) {
+	dir := t.TempDir()
+	m := New()
+	m.PersistPath = dir + "/health.json"
+	m.recordProbe("gone", true, 40*ms, ProbeKindEndToEnd)
+	m.recordProbe("keep", true, 20*ms, ProbeKindEndToEnd)
+	m.RecordForward("gone", true, 10*ms)
+	m.AddEgressTraffic("gone", 100, 200)
+
+	h := m.Snapshot()
+	if len(h.Egress) != 2 {
+		t.Fatalf("before forget egress=%d", len(h.Egress))
+	}
+	m.ForgetEgress("gone")
+	h = m.Snapshot()
+	if len(h.Egress) != 1 || h.Egress[0].Name != "keep" {
+		t.Fatalf("after forget: %+v", h.Egress)
+	}
+	if err := m.Save(); err != nil {
+		t.Fatal(err)
+	}
+	m2 := New()
+	m2.PersistPath = m.PersistPath
+	m2.Load()
+	h = m2.Snapshot()
+	for _, e := range h.Egress {
+		if e.Name == "gone" {
+			t.Fatal("deleted egress survived persist")
+		}
 	}
 }

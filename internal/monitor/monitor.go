@@ -428,6 +428,23 @@ func (m *Monitor) AddEgressTraffic(egress string, up, down int64) {
 	m.mu.Unlock()
 }
 
+// ForgetEgress 丢掉已删除出口的探测、转发、流量与告警状态。
+// 不落盘；调用方在配置已保存后调用，随后 Snapshot / Save 都不会再带上它。
+func (m *Monitor) ForgetEgress(name string) {
+	if m == nil || name == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.probes, name)
+	delete(m.fw, name)
+	delete(m.traffic, name)
+	delete(m.kinds, name)
+	delete(m.consec, name)
+	delete(m.alerted, name)
+	delete(m.lastAlert, name)
+	m.mu.Unlock()
+}
+
 // EgressHealth 是单出口健康汇总。
 type EgressHealth struct {
 	Name      string

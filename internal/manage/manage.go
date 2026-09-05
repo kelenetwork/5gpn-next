@@ -529,7 +529,14 @@ func (m *Manager) RemoveEgress(name string) error {
 	}
 	m.Cfg.Rules = kept
 
-	return m.saveAndReloadLocked()
+	if err := m.saveAndReloadLocked(); err != nil {
+		return err
+	}
+	if m.Health != nil {
+		m.Health.ForgetEgress(name)
+		_ = m.Health.Save()
+	}
+	return nil
 }
 
 // TestEgress 端到端测试一个出口，返回耗时。
@@ -1284,11 +1291,29 @@ func certNotAfter(path string) string {
 // ---------- 健康监控 ----------
 
 // HealthReport 是 Bot 与面板共用的健康快照。
+// 只展示当前配置里还在的出口，已删除的历史探测不会再出现。
 func (m *Manager) HealthReport() (monitor.Health, bool) {
 	if m.Health == nil {
 		return monitor.Health{}, false
 	}
-	return m.Health.Snapshot(), true
+	h := m.Health.Snapshot()
+	if m.Cfg == nil {
+		return h, true
+	}
+	m.mu.RLock()
+	alive := make(map[string]bool, len(m.Cfg.Egress))
+	for _, e := range m.Cfg.Egress {
+		alive[e.Name] = true
+	}
+	m.mu.RUnlock()
+	kept := h.Egress[:0]
+	for _, e := range h.Egress {
+		if alive[e.Name] {
+			kept = append(kept, e)
+		}
+	}
+	h.Egress = kept
+	return h, true
 }
 
 // HealthAnomalies 返回某出口最近异常探测点。
