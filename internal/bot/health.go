@@ -13,14 +13,13 @@ import (
 func (b *Bot) showHealth(ctx context.Context, v view) {
 	h, ok := b.Manager.HealthReport()
 	if !ok {
-		b.render(ctx, v, "🩺 <b>健康监控</b>\n\n监控未启用。", backTo("menu"))
+		b.render(ctx, v, pageHead("🔮", "健康")+"\n监控未启用。", backTo("menu"))
 		return
 	}
 	sys := b.Manager.SysHealthNow()
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s <b>健康监控</b>\n", em("🔮"))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("🔮", "健康") + "\n")
 
 	// ---- 出口 ----
 	if len(h.Egress) == 0 {
@@ -34,8 +33,7 @@ func (b *Bot) showHealth(ctx context.Context, v view) {
 		if target == "" {
 			target = "远端目标"
 		}
-		fmt.Fprintf(&sb, "<i>链路＝经出口到 %s 的 HTTP 探测往返；节点＝到节点 TCP；桥＝本机代理存活；转发＝真实用户流量</i>\n\n",
-			html.EscapeString(target))
+		fmt.Fprintf(&sb, "<i>%s · 链路 / 节点 / 桥</i>\n\n", html.EscapeString(target))
 	}
 
 	// ---- DoT ----
@@ -145,8 +143,7 @@ func (b *Bot) showHealthDetail(ctx context.Context, v view, name string) {
 	samples := b.Manager.HealthAnomalies(name, 20)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "🔍 <b>出口异常明细</b> · <code>%s</code>\n", html.EscapeString(name))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	fmt.Fprintf(&sb, "🔍  <b>%s</b>\n\n", html.EscapeString(name))
 	if len(samples) == 0 {
 		sb.WriteString("✅ 24h 内没有异常探测点，这条出口很稳。\n")
 	} else {
@@ -216,8 +213,7 @@ func (b *Bot) showMonitorSettings(ctx context.Context, v view) {
 	after, cooldown, disabled := b.Manager.MonitorSettings()
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s <b>告警设置</b>\n", em("🚫"))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("💡", "告警") + "\n")
 	state := "🟢 开启"
 	if disabled {
 		state = "🔴 关闭"

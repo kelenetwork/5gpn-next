@@ -73,15 +73,15 @@ const offsetFile = "/var/lib/5gpn-next/bot-offset"
 // New 构造 Bot。
 func New(token string, admins []int64, m *manage.Manager, version string) *Bot {
 	b := &Bot{
-		Token:     token,
-		Admins:    admins,
-		Manager:   m,
-		Version:   version,
-		client:    &http.Client{Timeout: 70 * time.Second},
-		pending:   make(map[int64]string),
+		Token:      token,
+		Admins:     admins,
+		Manager:    m,
+		Version:    version,
+		client:     &http.Client{Timeout: 70 * time.Second},
+		pending:    make(map[int64]string),
 		promptMsg:  make(map[int64]int64),
 		lastScreen: make(map[int64]int64),
-		greeted:   make(map[int64]bool),
+		greeted:    make(map[int64]bool),
 	}
 	if raw, err := os.ReadFile(offsetFile); err == nil {
 		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil && n > 0 {
@@ -426,7 +426,7 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 			"➕ <b>添加广告白名单</b>\n\n"+
 				"某个 App 被误杀（白屏、加载不出来）时，把它的域名加进来。\n\n"+
 				"直接发域名即可，例如：<code>example.com</code>\n"+
-				"会连同子域名一起放行。")
+				"会连同子域名一起放行。", "adblock")
 	case cmd == "ad_allow_list":
 		b.showAdAllowlist(ctx, v)
 	case strings.HasPrefix(cmd, "ad_allow_del:"):
@@ -443,6 +443,12 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.showPanel(ctx, v)
 	case cmd == "update":
 		b.showUpdate(ctx, v)
+	case strings.HasPrefix(cmd, "cancel:"):
+		b.mu.Lock()
+		delete(b.pending, v.chatID)
+		delete(b.promptMsg, v.chatID)
+		b.mu.Unlock()
+		b.dispatch(ctx, v, strings.TrimPrefix(cmd, "cancel:"))
 	case cmd == "cancel":
 		b.mu.Lock()
 		delete(b.pending, v.chatID)
@@ -456,14 +462,14 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 				"给这个出口起个名字（支持中文/emoji），\n"+
 				"例如：<code>东京家宽</code>\n"+
 				"之后出口列表、分流、监控都以这个名字显示。\n\n"+
-				"<i>直接粘贴节点链接可跳过命名，使用节点自带备注名。</i>")
+				"<i>直接粘贴节点链接可跳过命名，使用节点自带备注名。</i>", "egress")
 	case cmd == "ask_rule_add":
 		b.askRuleAdd(ctx, v)
 	case cmd == "ask_probe":
 		b.ask(ctx, v, "probe",
 			"🩺 <b>连通性诊断</b>\n\n"+
 				"请输入要检测的域名，例如 <code>youtube.com</code>\n\n"+
-				"将逐层检查入口、策略、出口、连接与应用层。")
+				"将逐层检查入口、策略、出口、连接与应用层。", "menu")
 
 	case cmd == "ios_dns_profile":
 		b.sendDNSProfile(ctx, v)
@@ -505,7 +511,7 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.ask(ctx, v, "update_interval",
 			"⏱ <b>调整检查间隔</b>\n\n"+
 				"请输入小时数（1-168），例如 <code>1</code> 或 <code>6</code>。\n\n"+
-				"<i>改动保存后，下次重启起完全生效。</i>")
+				"<i>改动保存后，下次重启起完全生效。</i>", "update")
 	case cmd == "monitor_settings":
 		b.showMonitorSettings(ctx, v)
 	case cmd == "monitor_toggle_alerts":
@@ -520,11 +526,11 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.ask(ctx, v, "monitor_after",
 			"🚨 <b>连续失败阈值</b>\n\n"+
 				"出口连续多少次探测失败才告警？请输入次数（1-60）。\n\n"+
-				"<i>每次探测间隔 60 秒；3 表示约 3 分钟无响应才提醒。</i>")
+				"<i>每次探测间隔 60 秒；3 表示约 3 分钟无响应才提醒。</i>", "monitor_settings")
 	case cmd == "ask_monitor_cooldown":
 		b.ask(ctx, v, "monitor_cooldown",
 			"🔕 <b>告警冷却</b>\n\n"+
-				"同一出口两次告警之间至少间隔多少分钟？请输入分钟数（1-1440）。")
+				"同一出口两次告警之间至少间隔多少分钟？请输入分钟数（1-1440）。", "monitor_settings")
 	case cmd == "update_rollback":
 		b.showRollback(ctx, v)
 	case strings.HasPrefix(cmd, "rollback:"):
@@ -547,7 +553,7 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		name := strings.TrimPrefix(cmd, "del_egress_ask:")
 		b.render(ctx, v, fmt.Sprintf(
 			"🗑 <b>确认删除出口</b> · <code>%s</code>\n\n"+
-				"将停止其代理实例并从列表移除；若为当前兜底出口，自动回落 KFC 本机出口。\n\n<b>此操作不可撤销。</b>",
+				"将停止其代理实例并从列表移除；若为当前兜底出口，自动回落本机直出。\n\n<b>此操作不可撤销。</b>",
 			html.EscapeString(name)),
 			inlineKeyboard(
 				[]btn{{"⚠️ 确认删除", "del_egress:" + name}},
@@ -558,7 +564,7 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.ask(ctx, v, "egress_rename|"+name,
 			fmt.Sprintf("✏️ <b>重命名出口</b> · <code>%s</code>\n\n"+
 				"发送新的显示名称（支持中文/emoji，24 字符内）。\n"+
-				"出口列表、分流、监控将统一显示新名字。", html.EscapeString(name)))
+				"出口列表、分流、监控将统一显示新名字。", html.EscapeString(name)), "egress_info:"+name)
 	case strings.HasPrefix(cmd, "del_egress:"):
 		name := strings.TrimPrefix(cmd, "del_egress:")
 		if err := b.Manager.RemoveEgress(name); err != nil {
@@ -583,9 +589,13 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 	}
 }
 
-func (b *Bot) ask(ctx context.Context, v view, action, prompt string) {
-	id := b.render(ctx, v, prompt+"\n\n<i>直接发送内容即可，或点下方取消。</i>",
-		inlineKeyboard([]btn{{"取消", "cancel"}}))
+func (b *Bot) ask(ctx context.Context, v view, action, prompt string, back ...string) {
+	dest := "menu"
+	if len(back) > 0 && back[0] != "" {
+		dest = back[0]
+	}
+	id := b.render(ctx, v, prompt+"\n\n<i>直接发送即可</i>",
+		inlineKeyboard([]btn{{"取消", "cancel:" + dest}}))
 	b.mu.Lock()
 	b.pending[v.chatID] = action
 	b.promptMsg[v.chatID] = id
@@ -624,7 +634,7 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 				"现在粘贴节点分享链接。\n\n"+
 				"支持：<code>ss</code> <code>vless</code> <code>vmess</code> "+
 				"<code>trojan</code> <code>hysteria2</code> <code>tuic</code> "+
-				"<code>socks5</code> <code>http</code>", html.EscapeString(in)))
+				"<code>socks5</code> <code>http</code>", html.EscapeString(in)), "egress")
 
 	case "rule_add":
 		if err := b.Manager.AddRule(text); err != nil {
@@ -691,7 +701,7 @@ func (b *Bot) handleInput(ctx context.Context, v view, action, text string) {
 			verdict, html.EscapeString(target), html.EscapeString(tr.Human()))
 		b.render(ctx, v, body, inlineKeyboard(
 			[]btn{{"🔁 再测一次", "ask_probe"}},
-			[]btn{{"« 返回主菜单", "menu"}},
+			[]btn{btnHome()},
 		))
 	}
 }
@@ -709,31 +719,36 @@ func (b *Bot) showMenu(ctx context.Context, v view) {
 		}
 	}
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s <b>5gpn-NEXT</b> · <i>网关管理控制台</i>\n", em("🤖"))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	fmt.Fprintf(&sb, "%s 运行 <b>%s</b> · 版本 <code>%s</code>\n", em("🔋"), st.Uptime, st.Version)
-	fmt.Fprintf(&sb, "%s 当前出口 <b>%s</b>\n", em("🌏"), html.EscapeString(cur))
-	fmt.Fprintf(&sb, "%s 分流规则 <b>%d</b> 条\n", em("🧭"), st.Rules)
+	live := "🟢"
+	if !st.DomesticReady {
+		live = "🟡"
+	}
 
-	// 升级横幅：缓存里有未忽略的新版本时，在主菜单直接提示。
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s  <b>5gpn-NEXT</b>\n", em("🤖"))
+	var info strings.Builder
+	fmt.Fprintf(&info, "%s 运行　<b>%s</b> · <code>%s</code>\n", live, st.Uptime, html.EscapeString(st.Version))
+	fmt.Fprintf(&info, "%s 出口　<b>%s</b>\n", em("🌏"), html.EscapeString(cur))
+	fmt.Fprintf(&info, "%s 规则　<b>%d</b>", em("🧭"), st.Rules)
+	if !st.DomesticReady {
+		info.WriteString("\n⚠️ 国内规则未就绪，已回落本机直出")
+	}
+	sb.WriteString(card(info.String()))
+
 	newTag := b.Manager.UpdateBanner()
 	if newTag != "" {
-		fmt.Fprintf(&sb, "\n%s <b>新版本 %s 可用</b> · 点下方按钮一键升级\n", em("🚀"), html.EscapeString(newTag))
+		fmt.Fprintf(&sb, "\n\n%s  <b>%s</b> 可更新", em("🚀"), html.EscapeString(newTag))
 	}
-	sb.WriteString("\n<i>请选择要执行的操作 ↓</i>")
 
 	rows := [][]btn{}
 	if newTag != "" {
 		rows = append(rows, []btn{{"🚀 升级到 " + newTag, "update_apply:" + newTag}})
 	}
 	rows = append(rows,
-		[]btn{{"📊 运行状态", "status"}, {"📈 网关转发流量", "traffic"}},
-		[]btn{{"🌐 出口管理", "egress"}, {"🧭 分流规则", "rules"}},
-		[]btn{{"🛡 广告拦截", "adblock"}, {"🩺 连通诊断", "ask_probe"}},
-		[]btn{{"💓 健康监控", "health"}},
-		[]btn{{"📱 客户端接入", "client"}, {"🖥 内网面板", "panel"}},
-		[]btn{{"🚀 版本更新", "update"}},
+		[]btn{{"📡 运行总览", "status"}},
+		[]btn{{"🌏 出口", "egress"}, {"🧭 规则", "rules"}},
+		[]btn{{"🛡 广告", "adblock"}, {"🩺 诊断", "ask_probe"}},
+		[]btn{{"📱 接入", "client"}, {"♻️ 更新", "update"}},
 	)
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
@@ -742,40 +757,71 @@ func (b *Bot) showStatus(ctx context.Context, v view) {
 	st := b.Manager.Status(b.Version)
 
 	var sb strings.Builder
-	sb.WriteString("📊 <b>运行状态</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	fmt.Fprintf(&sb, "🏷 版本　<code>%s</code>\n", st.Version)
-	fmt.Fprintf(&sb, "⏱ 运行　<b>%s</b>\n", st.Uptime)
-	fmt.Fprintf(&sb, "📡 监听　<code>%s</code>\n", html.EscapeString(st.Listen))
-	fmt.Fprintf(&sb, "💾 内存　<b>%.1f MB</b>\n", st.MemoryMB)
-	fmt.Fprintf(&sb, "📋 规则　<b>%d</b> 条\n", st.Rules)
-	if st.DomesticReady {
-		sb.WriteString("🇨🇳 国内　<b>直连规则已就绪</b>\n")
-	} else {
-		sb.WriteString("⚠️ 国内　<b>规则未就绪，国外出口已安全回落 KFC 本机出口</b>\n")
-	}
+	sb.WriteString(pageHead("📊", "运行总览"))
+	var info strings.Builder
+	fmt.Fprintf(&info, "版本　<code>%s</code>\n", html.EscapeString(st.Version))
+	fmt.Fprintf(&info, "运行　<b>%s</b>\n", st.Uptime)
+	fmt.Fprintf(&info, "监听　<code>%s</code>\n", html.EscapeString(st.Listen))
+	fmt.Fprintf(&info, "内存　<b>%.1f MB</b>", st.MemoryMB)
 	if st.CertUntil != "" {
-		fmt.Fprintf(&sb, "🔐 证书　%s\n", html.EscapeString(st.CertUntil))
+		fmt.Fprintf(&info, "\n证书　%s", html.EscapeString(st.CertUntil))
+	}
+	if st.DomesticReady {
+		info.WriteString("\n国内　直连规则已就绪")
+	} else {
+		info.WriteString("\n国内　⚠️ 规则未就绪，已回落本机直出")
+	}
+	sb.WriteString(card(info.String()))
+
+	if sum, ok := b.Manager.TrafficSummary(); ok {
+		fmt.Fprintf(&sb, "\n%s  <b>今日转发</b>\n", em("🔥"))
+		fmt.Fprintf(&sb, "%s\n", card(fmt.Sprintf("↑ %s　↓ %s　·　%s",
+			stats.HumanBytes(sum.Today.Up), stats.HumanBytes(sum.Today.Down),
+			stats.HumanBytes(sum.Today.Total()))))
+	}
+
+	if h, ok := b.Manager.HealthReport(); ok && len(h.Egress) > 0 {
+		var lines strings.Builder
+		for i, e := range h.Egress {
+			if i > 0 {
+				lines.WriteString("\n")
+			}
+			icon := rateIcon(e.Probe1h.FailRate())
+			if e.Probe1h.Count == 0 && e.Fw1h.Count > 0 {
+				icon = rateIcon(e.Fw1h.FailRate())
+			}
+			avg := "—"
+			if e.Probe1h.Count > 0 {
+				avg = e.Probe1h.Avg()
+			}
+			fmt.Fprintf(&lines, "%s <b>%s</b>　%s", icon, html.EscapeString(e.Name), avg)
+		}
+		sb.WriteString("\n<b>出口</b>\n")
+		sb.WriteString(card(lines.String()))
 	}
 
 	if len(st.Counters) > 0 {
-		sb.WriteString("\n<b>连接计数</b>\n<blockquote>")
+		var lines strings.Builder
 		first := true
 		for _, k := range []string{"connect", "blocked", "dial_fail", "auth_fail", "v6_fastfail"} {
 			if val, ok := st.Counters[k]; ok {
 				if !first {
-					sb.WriteString("\n")
+					lines.WriteString("\n")
 				}
 				first = false
-				fmt.Fprintf(&sb, "%s　<b>%d</b>", counterName(k), val)
+				fmt.Fprintf(&lines, "%s　<b>%d</b>", counterName(k), val)
 			}
 		}
-		sb.WriteString("</blockquote>")
+		if lines.Len() > 0 {
+			sb.WriteString("\n<b>连接</b>\n")
+			sb.WriteString(card(lines.String()))
+		}
 	}
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
+		[]btn{{"📈 流量", "traffic"}, {"💓 健康", "health"}},
 		[]btn{{"🔄 刷新", "status"}},
-		[]btn{{"« 返回主菜单", "menu"}},
+		[]btn{btnHome()},
 	))
 }
 
@@ -787,8 +833,7 @@ func (b *Bot) showTraffic(ctx context.Context, v view) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📈 <b>网关转发流量</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n")
+	sb.WriteString(pageHead("🔥", "转发流量"))
 	sb.WriteString("<i>这里只统计经过 5gpn-NEXT 服务器的数据，不是手机总流量。</i>\n\n")
 	row := func(icon, name string, d stats.Day) {
 		fmt.Fprintf(&sb, "%s <b>%s</b>　<b>%s</b>\n", icon, name, stats.HumanBytes(d.Total()))
@@ -832,7 +877,7 @@ func (b *Bot) showTraffic(ctx context.Context, v view) {
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
 		[]btn{{"🔄 刷新", "traffic"}},
-		[]btn{{"« 返回主菜单", "menu"}},
+		[]btn{btnHome()},
 	))
 }
 
@@ -850,10 +895,9 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s <b>国外默认出口</b>\n", em("🌏"))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("🌏", "出口"))
 	if !st.DomesticReady {
-		sb.WriteString("⚠️ <b>国内直连规则尚未就绪</b>\n<blockquote>为防止退化成国内外全局代理，当前运行态已安全回落 KFC 本机出口；切换代理出口时会先刷新规则。</blockquote>\n\n")
+		sb.WriteString("⚠️ <b>国内直连规则尚未就绪</b>\n<blockquote>为防止退化成全局代理，当前已回落本机直出；切换代理出口时会先刷新国内规则。</blockquote>\n\n")
 	}
 
 	var rows [][]btn
@@ -877,7 +921,7 @@ func (b *Bot) showEgress(ctx context.Context, v view) {
 	sb.WriteString("\n<i>● 为当前国外兜底出口。点节点名进入管理。</i>")
 
 	rows = append(rows, []btn{{"➕ 添加出口", "ask_egress_add"}})
-	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
+	rows = append(rows, []btn{btnHome()})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
@@ -902,7 +946,6 @@ func (b *Bot) showEgressInfo(ctx context.Context, v view, name string) {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s <b>%s</b>\n", em("🌏"), html.EscapeString(disp))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	if eg.Current {
 		sb.WriteString("● <b>当前国外兜底出口</b>\n")
 	}
@@ -981,8 +1024,7 @@ func (b *Bot) showAdBlock(ctx context.Context, v view) {
 	ad := st.AdBlock
 
 	var sb strings.Builder
-	sb.WriteString("🛡 <b>广告拦截</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("💪", "广告拦截"))
 
 	if ad.Enabled {
 		if ad.Domains > 0 {
@@ -1023,9 +1065,7 @@ func (b *Bot) showAdBlock(ctx context.Context, v view) {
 		sb.WriteString("</blockquote>\n\n")
 	}
 
-	sb.WriteString("<blockquote>在加密 DNS 入口返回 NXDOMAIN，全设备生效、无需安装 App。\n")
-	sb.WriteString("“成功”仅在响应已经写回手机后计数；不记录客户端 IP 或正常访问明细。</blockquote>\n\n")
-	sb.WriteString("<i>若某 App 白屏/加载不出，把其域名加入白名单即可救急。</i>")
+	sb.WriteString("\n<i>DNS 层拦截。误杀时把域名加入白名单即可。</i>")
 
 	rows := [][]btn{}
 	if ad.Enabled {
@@ -1035,7 +1075,7 @@ func (b *Bot) showAdBlock(ctx context.Context, v view) {
 	}
 	rows = append(rows,
 		[]btn{{"➕ 加白名单", "ask_ad_allow"}, {"📋 白名单", "ad_allow_list"}},
-		[]btn{{"« 返回主菜单", "menu"}},
+		[]btn{btnHome()},
 	)
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
@@ -1054,7 +1094,7 @@ func (b *Bot) doAdBlockToggle(ctx context.Context, v view, on bool) {
 	}
 	b.render(ctx, v, "✅ "+html.EscapeString(msg), inlineKeyboard(
 		[]btn{{"🛡 返回广告拦截", "adblock"}},
-		[]btn{{"« 返回主菜单", "menu"}},
+		[]btn{btnHome()},
 	))
 }
 
@@ -1063,8 +1103,7 @@ func (b *Bot) showAdAllowlist(ctx context.Context, v view) {
 	list := b.Manager.AdAllowlist()
 
 	var sb strings.Builder
-	sb.WriteString("📋 <b>广告白名单</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("📋", "广告白名单"))
 	if len(list) == 0 {
 		sb.WriteString("<blockquote>暂无白名单。\n某个 App 被误杀时，把它的域名加进来即可放行。</blockquote>")
 	} else {
@@ -1096,9 +1135,8 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 	rules := b.Manager.Rules()
 
 	var sb strings.Builder
-	sb.WriteString("🧭 <b>分流规则</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString("<i>匹配顺序：内置保护 → 自定义规则 → 内置兜底，命中即停止。</i>\n\n")
+	sb.WriteString(pageHead("🧭", "分流规则"))
+	sb.WriteString("<i>先匹配自定义，再走内置国内直连与默认出口。</i>\n\n")
 
 	sb.WriteString("✏️ <b>自定义规则</b>\n")
 	if len(rules) == 0 {
@@ -1144,7 +1182,7 @@ func (b *Bot) showRules(ctx context.Context, v view) {
 	if len(rules) > 0 {
 		rows = append(rows, []btn{{"🗑 删除规则", "rule_del_menu"}})
 	}
-	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
+	rows = append(rows, []btn{btnHome()})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
@@ -1153,7 +1191,7 @@ func (b *Bot) askRuleAdd(ctx context.Context, v view) {
 	var sb strings.Builder
 	sb.WriteString("➕ <b>添加分流规则</b>\n\n")
 	sb.WriteString("格式：<code>类型,值,动作</code>\n\n")
-	sb.WriteString("<b>动作</b>：<code>direct</code>（KFC 本机公网直出）· ")
+	sb.WriteString("<b>动作</b>：<code>direct</code>（本机直出）· ")
 	sb.WriteString("<code>block</code>（拦截）· <code>proxy:出口名</code>\n\n")
 
 	names := b.Manager.SortedEgressNames()
@@ -1180,7 +1218,7 @@ func (b *Bot) askRuleAdd(ctx context.Context, v view) {
 	sb.WriteString("<code>DOMAIN-KEYWORD,ads,block</code>\n\n")
 	sb.WriteString("新规则会插入到最前面，优先匹配；不同域名可分流到不同出口。")
 
-	b.ask(ctx, v, "rule_add", sb.String())
+	b.ask(ctx, v, "rule_add", sb.String(), "rules")
 }
 
 // showRuleDelMenu 列出可删除的自定义规则，每条一个按钮，按钮上带规则内容。
@@ -1192,8 +1230,7 @@ func (b *Bot) showRuleDelMenu(ctx context.Context, v view) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🗑 <b>删除规则</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("💬", "删除规则"))
 	sb.WriteString("<i>点击要删除的规则，删除前会再确认一次。</i>\n\n<blockquote>")
 	for i, r := range rules {
 		if i >= 12 {
@@ -1274,27 +1311,31 @@ func ruleFingerprint(r string) string {
 
 func (b *Bot) showClient(ctx context.Context, v view) {
 	var sb strings.Builder
-	sb.WriteString("📱 <b>客户端接入</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString("🍎 <b>iPhone / iPad</b>　<i>iOS 17 及以上</i>\n")
-	sb.WriteString("<blockquote>安装一张描述文件，仅<b>蜂窝数据</b>下生效；连 Wi-Fi 自动停用，家里网络完全不受影响。\n\n国内域名/IP 由 GEOIP 判定后<b>手机本地直连</b>，不经网关；只有国外流量才走出口。</blockquote>\n")
-	sb.WriteString("🤖 <b>Android</b>\n")
-	sb.WriteString("<blockquote>在系统「私人 DNS」中填一个域名即可，同样无需安装应用。</blockquote>")
+	sb.WriteString(pageHead("📱", "接入"))
+	sb.WriteString("<b>iPhone / iPad</b>\n")
+	sb.WriteString(card("安装描述文件，仅蜂窝数据生效；连 Wi-Fi 自动停用。国内流量手机直连，国外才走出口。") + "\n")
+	sb.WriteString("<b>Android</b>\n")
+	sb.WriteString(card("系统「私人 DNS」填入网关域名即可，不用装 App。"))
+	if b.PanelURL != "" {
+		sb.WriteString("\n<b>内网面板</b>\n")
+		sb.WriteString(card("<code>" + html.EscapeString(b.PanelURL) + "</code>\n手机走内网卡直接打开，无需登录。"))
+	}
 
 	rows := [][]btn{}
 	if b.Manager.DNSProfileBytes != nil {
-		rows = append(rows, []btn{{"📱 获取 iOS 描述文件", "ios_dns_profile"}})
+		rows = append(rows, []btn{{"🍎 获取 iOS 描述文件", "ios_dns_profile"}})
 	}
-	rows = append(rows,
-		[]btn{{"🤖 Android 接入方法", "android_guide"}},
-		[]btn{{"« 返回主菜单", "menu"}},
-	)
+	rows = append(rows, []btn{{"🤖 Android 接入", "android_guide"}})
+	if b.PanelURL != "" {
+		rows = append(rows, []btn{{"🖥 打开面板", "url:" + b.PanelURL}})
+	}
+	rows = append(rows, []btn{btnHome()})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
 func (b *Bot) showPanel(ctx context.Context, v view) {
 	var sb strings.Builder
-	sb.WriteString("🖥 <b>内网 Web 面板</b>\n\n")
+	sb.WriteString(pageHead("💻", "内网面板") + "\n")
 
 	if b.PanelURL == "" {
 		sb.WriteString("面板未启用。\n\n")
@@ -1312,7 +1353,7 @@ func (b *Bot) showPanel(ctx context.Context, v view) {
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
 		[]btn{{"🖥 打开面板", "url:" + b.PanelURL}},
-		[]btn{{"« 返回主菜单", "menu"}},
+		[]btn{btnHome()},
 	))
 }
 
@@ -1323,8 +1364,7 @@ func (b *Bot) showAndroid(ctx context.Context, v view) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🤖 <b>Android 接入</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("🤖", "Android 接入"))
 
 	if !g.Enabled {
 		sb.WriteString("当前未启用 Android 支持。\n\n")
@@ -1346,7 +1386,7 @@ func (b *Bot) showAndroid(ctx context.Context, v view) {
 
 	b.render(ctx, v, sb.String(), inlineKeyboard(
 		[]btn{{"« 返回客户端", "client"}},
-		[]btn{{"« 返回主菜单", "menu"}},
+		[]btn{btnHome()},
 	))
 }
 
@@ -1358,8 +1398,7 @@ func (b *Bot) showUpdate(ctx context.Context, v view) {
 	rel, checkedAt, hasCache := b.Manager.CachedUpdate()
 
 	var sb strings.Builder
-	sb.WriteString("🚀 <b>版本更新</b>\n")
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("🚀", "版本更新"))
 	fmt.Fprintf(&sb, "🏷 当前版本　<code>%s</code>\n", html.EscapeString(b.Version))
 	if checkOn {
 		fmt.Fprintf(&sb, "🔁 自动检查　<b>开</b> · 每 %d 小时\n", interval)
@@ -1409,7 +1448,7 @@ func (b *Bot) showUpdate(ctx context.Context, v view) {
 	if len(b.Manager.RollbackVersions()) > 0 {
 		rows = append(rows, []btn{{"⏪ 回退到旧版本", "update_rollback"}})
 	}
-	rows = append(rows, []btn{{"« 返回主菜单", "menu"}})
+	rows = append(rows, []btn{btnHome()})
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
@@ -1447,7 +1486,6 @@ func (b *Bot) doUpdateCheck(ctx context.Context, v view) {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "🆕 <b>发现新版本 %s</b>\n", html.EscapeString(rel.Tag))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	fmt.Fprintf(&sb, "🏷 当前　<code>%s</code>\n", html.EscapeString(b.Version))
 	if !rel.Published.IsZero() {
 		fmt.Fprintf(&sb, "📅 发布　%s\n", rel.Published.Format("2006-01-02 15:04"))
@@ -1474,7 +1512,6 @@ var updateStages = []struct{ key, label string }{
 func renderUpdateProgress(tag, current string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s <b>正在升级到 %s</b>\n", em("🚀"), html.EscapeString(tag))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
 	reached := true
 	for _, st := range updateStages {
 		switch {
@@ -1620,7 +1657,7 @@ func (b *Bot) sendDNSProfile(ctx context.Context, v view) {
 	b.render(ctx, v, done,
 		inlineKeyboard(
 			[]btn{{"重新获取", "ios_dns_profile"}},
-			[]btn{{"返回主菜单", "menu"}},
+			[]btn{btnHome()},
 		))
 }
 
@@ -1737,10 +1774,10 @@ func inlineKeyboard(rows ...[]btn) string {
 }
 
 func backTo(target string) string {
-	if target == "menu" {
-		return inlineKeyboard([]btn{{"返回主菜单", "menu"}})
+	if target == "menu" || target == "" {
+		return inlineKeyboard([]btn{btnHome()})
 	}
-	return inlineKeyboard([]btn{{"返回", target}}, []btn{{"返回主菜单", "menu"}})
+	return inlineKeyboard([]btn{btnBack(target), btnHome()})
 }
 
 func errBox(title string, err error) string {
@@ -1794,8 +1831,7 @@ func (b *Bot) showUpdateBackups(ctx context.Context, v view) {
 	backups := b.Manager.UpdateBackups()
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s <b>本地版本备份</b>\n", em("♻️"))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("♻️", "本地备份"))
 	if len(backups) == 0 {
 		sb.WriteString("暂无备份。首次升级时会自动保留当前版本。\n")
 	} else {
@@ -1825,8 +1861,7 @@ func (b *Bot) showUpdateHistory(ctx context.Context, v view) {
 	hist := b.Manager.UpdateHistory(10)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s <b>升级历史</b>\n", em("📊"))
-	sb.WriteString("━━━━━━━━━━━━━━━━━━\n\n")
+	sb.WriteString(pageHead("📊", "升级历史"))
 	if len(hist) == 0 {
 		sb.WriteString("暂无记录。升级完成后（无论成败）都会在这里留档。\n")
 	} else {
@@ -1874,5 +1909,5 @@ func (b *Bot) doEgressAdd(ctx context.Context, v view, name, link string) {
 		return
 	}
 	b.render(ctx, v, fmt.Sprintf("%s <b>已添加出口</b>\n\n%s", em("✅"), html.EscapeString(msg)),
-		inlineKeyboard([]btn{{"🌐 查看出口", "egress"}}, []btn{{"« 返回主菜单", "menu"}}))
+		inlineKeyboard([]btn{{"🌐 查看出口", "egress"}}, []btn{btnHome()}))
 }
