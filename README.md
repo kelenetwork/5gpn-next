@@ -104,12 +104,18 @@ curl -fsSL https://raw.githubusercontent.com/kelenetwork/5gpn-next/main/install.
 
 安装器会自动完成：
 
-1. 📦 下载当前 Release 并识别 CPU 架构；
+1. 📦 下载当前 Release、校验 SHA256，并识别 CPU 架构；
 2. 🔐 申请或复用 Let's Encrypt 证书；
 3. 🌐 可选部署 mihomo 出口；
-4. ⚙️ 写入 `/etc/5gpn-next/config.json`；
+4. ⚙️ 写入 `/etc/5gpn-next/config.json`（已有配置默认保留，不覆盖规则 / 出口 / Bot）；
 5. 🔥 创建仅允许客户端网段访问的 nftables 规则；
 6. ✅ 启动并自检 `5gpn-next.service`。
+
+再次运行安装器只会更新程序与 systemd 单元。若要重新生成配置：
+
+```bash
+sudo FGPN_FORCE_RECONFIG=1 bash install.sh
+```
 
 ### 卸载
 

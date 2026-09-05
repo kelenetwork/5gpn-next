@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Shell syntax
+        run: bash -n install.sh uninstall.sh scripts/build-release.sh
+
+  release-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build release binaries
+        # 用占位 tag 验证脚本：版本注入与 SHA256SUMS 必须同时成功。
+        # 正式发布仍由 scripts/build-release.sh <真实 tag> 产出后上传 GitHub Release。
+        run: bash scripts/build-release.sh v0.0.0
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: 5gpnd-linux
+          path: dist/
+          if-no-files-found: error

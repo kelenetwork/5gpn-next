@@ -29,32 +29,27 @@ func writeCfg(t *testing.T, updateRaw string) string {
 	return p
 }
 
-// TestLegacyIntervalMigratedToNewDefault 锁定本次修复：
-//
-// 已安装机器的 config.json 里硬写着 interval_hours: 12，只改代码默认值
-// 对它们无效——会一直沿用 12 小时。实践证明 12 小时太钝：一次发布最坏
-// 要等 12 小时才提醒，且检查点绑在进程启动时刻，重启一次就漂移一次，
-// 连发几个版本会全部掉进检查间隙，用户一条提醒都收不到。
-func TestLegacyIntervalMigratedToNewDefault(t *testing.T) {
+// TestTwelveHourIntervalIsPreserved 12 小时是合法的显式选择，不得再被
+// 当成「从未改过的旧默认」改写成 1。那会让想保持 12 小时的人保不住。
+func TestTwelveHourIntervalIsPreserved(t *testing.T) {
 	p := writeCfg(t, `{ "check_enabled": true, "interval_hours": 12, "auto_apply": false }`)
 	c, err := Load(p)
 	if err != nil {
 		t.Fatalf("加载失败: %v", err)
 	}
-	if c.Update.IntervalHours != DefaultUpdateIntervalHours {
-		t.Fatalf("旧默认值 12 应迁移为 %d，实际 %d",
-			DefaultUpdateIntervalHours, c.Update.IntervalHours)
+	if c.Update.IntervalHours != LegacyUpdateIntervalHours {
+		t.Fatalf("显式 12 小时被改成了 %d", c.Update.IntervalHours)
 	}
 }
 
-func TestLegacyIntervalMigrationIsPersisted(t *testing.T) {
+func TestTwelveHourIntervalIsNotRewrittenOnDisk(t *testing.T) {
 	p := writeCfg(t, `{ "check_enabled": true, "interval_hours": 12, "auto_apply": false }`)
 	changed, err := MigrateLegacyFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed {
-		t.Fatal("disk config with legacy default should be rewritten")
+	if changed {
+		t.Fatal("current-schema config with interval_hours=12 must not be rewritten")
 	}
 	var raw struct {
 		Update UpdateConfig `json:"update"`
@@ -66,19 +61,14 @@ func TestLegacyIntervalMigrationIsPersisted(t *testing.T) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw.Update.IntervalHours != DefaultUpdateIntervalHours {
-		t.Fatalf("persisted interval=%d, want %d",
-			raw.Update.IntervalHours, DefaultUpdateIntervalHours)
+	if raw.Update.IntervalHours != LegacyUpdateIntervalHours {
+		t.Fatalf("persisted interval=%d, want 12", raw.Update.IntervalHours)
 	}
 }
 
-// TestExplicitIntervalPreserved 用户显式设置的间隔不得被覆盖。
-// 迁移只认「恰好等于旧默认值」这一种情况，其它取值都是主动选择。
+// TestExplicitIntervalPreserved 用户显式设置的间隔不得被覆盖，包括 12。
 func TestExplicitIntervalPreserved(t *testing.T) {
-	for _, want := range []int{1, 2, 6, 24, 48} {
-		if want == LegacyUpdateIntervalHours {
-			continue
-		}
+	for _, want := range []int{1, 2, 6, 12, 24, 48} {
 		raw := `{ "check_enabled": true, "interval_hours": ` +
 			jsonInt(want) + `, "auto_apply": false }`
 		c, err := Load(writeCfg(t, raw))
@@ -101,6 +91,23 @@ func TestZeroIntervalFallsBackToDefault(t *testing.T) {
 	if c.Update.IntervalHours != 0 {
 		t.Fatalf("interval_hours=0 应保持原样交由运行时兜底，实际 %d",
 			c.Update.IntervalHours)
+	}
+}
+
+func TestExampleConfigUsesNewInterval(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "deploy", "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		Update UpdateConfig `json:"update"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.Update.IntervalHours != DefaultUpdateIntervalHours {
+		t.Fatalf("config.example.json interval_hours=%d, want %d",
+			raw.Update.IntervalHours, DefaultUpdateIntervalHours)
 	}
 }
 

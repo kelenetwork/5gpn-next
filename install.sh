@@ -9,8 +9,12 @@
 #        FGPN_NODE='ss://...' \
 #        FGPN_NONINTERACTIVE=1 bash install.sh
 #
+# 已有 /etc/5gpn-next/config.json 时默认保留配置，只更新程序与服务。
+# 强制重写配置：FGPN_FORCE_RECONFIG=1
+#
 # 本脚本只做四件事：装二进制、签证书、写配置、起服务。
 # 所有业务逻辑在 5gpnd 里，脚本保持可读。
+# Release 二进制必须通过 SHA256SUMS 校验后才会落地。
 set -euo pipefail
 
 REPO="kelenetwork/5gpn-next"
@@ -75,6 +79,8 @@ need_pkg() {  # need_pkg <命令> <包名>
 
 need_pkg curl curl
 need_pkg nft nftables
+need_pkg sha256sum coreutils
+need_pkg python3 python3
 
 if [ -n "$MISSING_PKGS" ]; then
   command -v apt-get >/dev/null 2>&1 \
@@ -83,7 +89,7 @@ if [ -n "$MISSING_PKGS" ]; then
   apt-get update -qq >/dev/null 2>&1 || true
   # shellcheck disable=SC2086
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $MISSING_PKGS >/dev/null 2>&1 || true
-  for c in curl nft; do
+  for c in curl nft sha256sum python3; do
     command -v "$c" >/dev/null 2>&1 \
       || die "依赖 $c 自动安装失败，请手动执行：apt install -y $MISSING_PKGS"
   done
@@ -98,6 +104,33 @@ ok "依赖齐全"
 
 # ---------------------------------------------------------------- 1. 收集参数
 step "配置参数"
+
+# 读取已有配置的关键字段。失败返回非 0，调用方不得覆盖原文件。
+read_existing_config() {
+  local cfg="$1"
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$cfg" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1], encoding="utf-8"))
+g = c.get("gateway") or c.get("relay") or {}
+d = c.get("dns") or c.get("android") or {}
+host = (g.get("host") or "").strip()
+listen = (g.get("listen") or ":20443").strip() or ":20443"
+port = listen.rsplit(":", 1)[-1]
+if not port.isdigit():
+    port = "20443"
+cidr = (c.get("client_cidr") or "172.22.0.0/16").strip()
+dns_on = "true" if d.get("enabled", True) else "false"
+if not host or not cidr:
+    sys.exit(1)
+path = (g.get("profile_path") or "").strip()
+print(host)
+print(port)
+print(cidr)
+print(dns_on)
+print(path)
+PY
+}
 
 ask() {  # ask <变量名> <提示> <默认值>
   local __var=$1 __prompt=$2 __default=${3:-} __val
@@ -116,6 +149,34 @@ ask() {  # ask <变量名> <提示> <默认值>
 PUBIP=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
 [ -n "$PUBIP" ] && dim "本机公网 IP：$PUBIP"
 
+REUSE_CONFIG=0
+if [ -s "$CFGDIR/config.json" ] && [ "${FGPN_FORCE_RECONFIG:-0}" != "1" ]; then
+  if EXISTING_FIELDS=$(read_existing_config "$CFGDIR/config.json"); then
+    REUSE_CONFIG=1
+    DOMAIN=$(printf '%s\n' "$EXISTING_FIELDS" | sed -n '1p')
+    LISTEN_PORT=$(printf '%s\n' "$EXISTING_FIELDS" | sed -n '2p')
+    CLIENT_CIDR=$(printf '%s\n' "$EXISTING_FIELDS" | sed -n '3p')
+    DNS_ON=$(printf '%s\n' "$EXISTING_FIELDS" | sed -n '4p')
+    DLPATH=$(printf '%s\n' "$EXISTING_FIELDS" | sed -n '5p')
+    [ -n "$DOMAIN" ] || die "已有配置缺少 gateway.host，拒绝覆盖"
+    ok "检测到已有配置，将保留 $CFGDIR/config.json（只更新程序与服务）"
+    dim "如需重新生成配置：FGPN_FORCE_RECONFIG=1 sudo bash install.sh"
+  else
+    die "已有 $CFGDIR/config.json 但无法解析，拒绝覆盖。修复该文件，或设 FGPN_FORCE_RECONFIG=1 强制重写"
+  fi
+fi
+
+if [ "$REUSE_CONFIG" = "1" ]; then
+  NODE=""
+  BOT_TK=""
+  BOT_IDS=""
+  EMAIL="${FGPN_EMAIL:-}"
+  if [ -z "$EMAIL" ]; then
+    CERT_EMAIL_ARG="--register-unsafely-without-email"
+  else
+    CERT_EMAIL_ARG="--email $EMAIL"
+  fi
+else
 DOMAIN=$(FGPN_DOMAIN="${FGPN_DOMAIN:-}" ask FGPN_DOMAIN "网关域名（需已 A 记录指向本机）")
 [ -n "$DOMAIN" ] || die "域名不能为空"
 
@@ -149,6 +210,7 @@ fi
 
 # iOS 蜂窝加密 DNS 与 Android 私人 DNS 共用同一套接入与分流策略。
 DNS_ON=true
+fi
 
 # 域名解析校验
 RESOLVED=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
@@ -172,25 +234,45 @@ TAG=$(curl -fsS --max-time 20 "https://api.github.com/repos/${REPO}/releases/lat
       | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
 
 install -d -m 755 /usr/local/bin
+install_release_bin() {
+  local tag="$1" arch="$2"
+  local asset="5gpnd-linux-${arch}"
+  local base="https://github.com/${REPO}/releases/download/${tag}"
+  local tmpdir bin sums want got
+  tmpdir=$(mktemp -d)
+  bin="$tmpdir/$asset"
+  sums="$tmpdir/SHA256SUMS"
+  curl -fsSL --max-time 120 "$base/$asset" -o "$bin" || { rm -rf "$tmpdir"; return 1; }
+  curl -fsSL --max-time 30 "$base/SHA256SUMS" -o "$sums" \
+    || die "已找到 $tag 但缺少 SHA256SUMS，拒绝安装未校验产物"
+  want=$(awk -v f="$asset" '$2==f || $2=="*"f {print tolower($1); exit}' "$sums")
+  [ -n "$want" ] || die "SHA256SUMS 中没有 $asset"
+  got=$(sha256sum "$bin" | awk '{print tolower($1)}')
+  [ "$got" = "$want" ] || die "校验失败：$asset 期望 $want，实际 $got"
+  mv -f "$bin" /usr/local/bin/5gpnd
+  chmod 755 /usr/local/bin/5gpnd
+  rm -rf "$tmpdir"
+}
+
 if [ -n "$TAG" ]; then
-  URL="https://github.com/${REPO}/releases/download/${TAG}/5gpnd-linux-${GOARCH}"
-  if curl -fsSL --max-time 120 "$URL" -o /usr/local/bin/5gpnd.new 2>/dev/null; then
-    mv -f /usr/local/bin/5gpnd.new /usr/local/bin/5gpnd
-    chmod 755 /usr/local/bin/5gpnd
-    ok "5gpnd $TAG 已安装"
+  if install_release_bin "$TAG" "$GOARCH"; then
+    ok "5gpnd $TAG 已安装（SHA256 已校验）"
   else
-    rm -f /usr/local/bin/5gpnd.new
-    TAG=""
+    die "下载 $TAG 的 $GOARCH 二进制失败"
   fi
-fi
-if [ -z "$TAG" ]; then
+else
   command -v go >/dev/null 2>&1 || die "未找到发布版且本机无 Go，无法安装。请先安装 Go 1.23+ 或等待 release 发布"
   warn "未找到发布版，从源码构建"
-  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+  tmp=$(mktemp -d)
   curl -fsSL "https://github.com/${REPO}/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp" --strip-components=1
-  ( cd "$tmp" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /usr/local/bin/5gpnd ./cmd/5gpnd )
+  SRC_SHA=$(curl -fsS --max-time 20 "https://api.github.com/repos/${REPO}/commits/main" 2>/dev/null \
+            | sed -n 's/.*"sha": *"\([a-f0-9]\{7\}\).*/\1/p' | head -1)
+  SRC_VER="dev"
+  [ -n "$SRC_SHA" ] && SRC_VER="dev-${SRC_SHA}"
+  ( cd "$tmp" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${SRC_VER}" -o /usr/local/bin/5gpnd ./cmd/5gpnd )
   chmod 755 /usr/local/bin/5gpnd
-  ok "已从源码构建"
+  rm -rf "$tmp"
+  ok "已从源码构建（version=${SRC_VER}）"
 fi
 /usr/local/bin/5gpnd version 2>&1 | sed -n '1p' | sed 's/^/  /'
 
@@ -232,6 +314,9 @@ else
 fi
 
 # ---------------------------------------------------------------- 4. 落地节点
+if [ "$REUSE_CONFIG" = "1" ]; then
+  dim "保留已有出口与节点配置"
+else
 step "配置出口"
 
 EGRESS_JSON='{ "name": "DIRECT", "type": "direct" }'
@@ -345,7 +430,14 @@ if [ "$DNS_ON" = "true" ]; then
   fi
 fi
 
+fi
+
 # ---------------------------------------------------------------- 5. 写配置
+if [ "$REUSE_CONFIG" = "1" ]; then
+  /usr/local/bin/5gpnd check -c "$CFGDIR/config.json" >/dev/null 2>&1 \
+    || die "已有配置校验失败，拒绝继续。修复 $CFGDIR/config.json 或设 FGPN_FORCE_RECONFIG=1"
+  ok "已保留 $CFGDIR/config.json"
+else
 step "生成配置"
 
 DLPATH="/dl/$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')/5gpn-next.mobileconfig"
@@ -424,6 +516,7 @@ EOF
 chmod 600 "$CFGDIR/config.json"
 /usr/local/bin/5gpnd check -c "$CFGDIR/config.json" >/dev/null 2>&1 || die "配置校验失败"
 ok "配置已写入 $CFGDIR/config.json"
+fi
 
 # ---------------------------------------------------------------- 6. 防火墙
 step "配置防火墙"
@@ -632,7 +725,9 @@ for t in weibo.com chatgpt.com; do
   fi
 done
 
-if [ -n "$BOT_TK" ]; then
+if [ "$REUSE_CONFIG" = "1" ]; then
+  BOT_HINT="沿用已有配置。向 Bot 发送 /start 打开菜单；未配置则可编辑 ${CFGDIR}/config.json 的 bot 段。"
+elif [ -n "$BOT_TK" ]; then
   BOT_HINT="已启用。向你的 Bot 发送 /start 打开菜单。"
 else
   BOT_HINT="未配置。如需启用：编辑 ${CFGDIR}/config.json 的 bot 段，再 systemctl restart 5gpn-next"
