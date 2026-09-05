@@ -46,7 +46,7 @@
   },
   "update": {
     "check_enabled": true,
-    "interval_hours": 12,
+    "interval_hours": 1,
     "auto_apply": false
   },
   "prefer_ipv4": true,

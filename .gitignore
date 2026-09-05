@@ -1,5 +1,6 @@
 # 构建产物
 /bin/
+/dist/
 *.exe
 5gpn-next
 /5gpnd
