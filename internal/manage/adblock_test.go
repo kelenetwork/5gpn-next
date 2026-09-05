@@ -81,3 +81,29 @@ func TestEffectiveRuleSetsIncludesImplicitAdBlock(t *testing.T) {
 		t.Fatal("implicit ad-block ruleset missing from refresh list")
 	}
 }
+
+func TestAllowAdAcceptsURLAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	path := filepath.Join(dir, "config.json")
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m := New(path, cfg, policy.New(), egress.NewRegistry())
+	if err := m.AllowAd("https://Ads.Example.com/tracker?x=1"); err != nil {
+		t.Fatal(err)
+	}
+	got := m.AdAllowlist()
+	if len(got) != 1 || got[0] != "ads.example.com" {
+		t.Fatalf("allowlist=%v", got)
+	}
+	if err := m.AllowAd("ADS.EXAMPLE.COM"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.AdAllowlist()) != 1 {
+		t.Fatal("duplicate allow should be idempotent")
+	}
+	if err := m.AllowAd("https://bad,comma.example"); err == nil {
+		t.Fatal("malformed domain must fail")
+	}
+}

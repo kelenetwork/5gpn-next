@@ -421,6 +421,8 @@ func (b *Bot) dispatch(ctx context.Context, v view, cmd string) {
 		b.doAdBlockToggle(ctx, v, true)
 	case cmd == "adblock_off":
 		b.doAdBlockToggle(ctx, v, false)
+	case strings.HasPrefix(cmd, "ad_allow_hit:"):
+		b.doAdAllowHit(ctx, v, strings.TrimPrefix(cmd, "ad_allow_hit:"))
 	case cmd == "ask_ad_allow":
 		b.ask(ctx, v, "ad_allow",
 			"➕ <b>添加广告白名单</b>\n\n"+
@@ -1025,80 +1027,91 @@ func (b *Bot) showAdBlock(ctx context.Context, v view) {
 
 	var sb strings.Builder
 	sb.WriteString(pageHead("💪", "广告拦截"))
-
+	var info strings.Builder
 	if ad.Enabled {
 		if ad.Domains > 0 {
-			fmt.Fprintf(&sb, "状态　<b>已开启</b>\n规则　<b>%d</b> 条拦截域名\n", ad.Domains)
+			fmt.Fprintf(&info, "状态　<b>开启</b> · <b>%d</b> 条规则", ad.Domains)
 		} else {
-			sb.WriteString("状态　<b>已开启</b>\n⚠️ 规则集尚未载入（下载中或下载失败）\n")
+			info.WriteString("状态　<b>开启</b>\n⚠️ 规则尚未载入")
 		}
 	} else {
-		sb.WriteString("状态　<b>已关闭</b>\n")
+		info.WriteString("状态　<b>关闭</b>")
 	}
-	fmt.Fprintf(&sb, "白名单　<b>%d</b> 条\n", ad.Allowlist)
-	fmt.Fprintf(&sb, "今日成功　<b>%d</b> 次\n累计成功　<b>%d</b> 次\n\n", ad.Hits.Today, ad.Hits.Total)
-
-	if len(ad.Hits.Recent) > 0 {
-		sb.WriteString("🕘 <b>最近成功命中</b>\n<blockquote>")
-		for i, ev := range ad.Hits.Recent {
-			if i >= 5 {
-				break
-			}
-			if i > 0 {
-				sb.WriteString("\n")
-			}
-			fmt.Fprintf(&sb, "<code>%s</code> · %s", html.EscapeString(ev.Host), time.Unix(ev.At, 0).Format("01-02 15:04"))
-		}
-		sb.WriteString("</blockquote>\n\n")
+	fmt.Fprintf(&info, "\n今日　<b>%d</b>　·　累计　<b>%d</b>", ad.Hits.Today, ad.Hits.Total)
+	if ad.Allowlist > 0 {
+		fmt.Fprintf(&info, "\n白名单　<b>%d</b> 条", ad.Allowlist)
 	}
-	if len(ad.Hits.Top) > 0 {
-		sb.WriteString("🔥 <b>高频拦截</b>\n<blockquote>")
-		for i, item := range ad.Hits.Top {
-			if i >= 5 {
-				break
-			}
-			if i > 0 {
-				sb.WriteString("\n")
-			}
-			fmt.Fprintf(&sb, "%d. <code>%s</code> · %d 次", i+1, html.EscapeString(item.Host), item.Count)
-		}
-		sb.WriteString("</blockquote>\n\n")
-	}
-
-	sb.WriteString("\n<i>DNS 层拦截。误杀时把域名加入白名单即可。</i>")
+	sb.WriteString(card(info.String()))
 
 	rows := [][]btn{}
+	if n := len(ad.Hits.Recent); n > 0 {
+		if n > 5 {
+			n = 5
+		}
+		sb.WriteString("\n<b>最近拦截</b>　<i>点域名即可放行</i>\n<blockquote>")
+		for i := 0; i < n; i++ {
+			ev := ad.Hits.Recent[i]
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "<code>%s</code> · %s", html.EscapeString(ev.Host), time.Unix(ev.At, 0).Format("15:04"))
+			rows = append(rows, []btn{{
+				"➕ " + truncateText(ev.Host, 22),
+				"ad_allow_hit:" + ruleFingerprint(ev.Host),
+			}})
+		}
+		sb.WriteString("</blockquote>")
+	} else if ad.Enabled {
+		sb.WriteString("\n<i>还没有成功拦截记录。</i>")
+	}
+	sb.WriteString("\n<i>只拦系统 DNS。App 自带 DoH 或直连 IP 拦不到。</i>")
+
 	if ad.Enabled {
-		rows = append(rows, []btn{{"🔴 关闭拦截", "adblock_off"}})
+		rows = append(rows, []btn{{"🔴 关闭", "adblock_off"}, {"🔄 刷新规则", "adblock_on"}})
 	} else {
 		rows = append(rows, []btn{{"🟢 开启拦截", "adblock_on"}})
 	}
 	rows = append(rows,
-		[]btn{{"➕ 加白名单", "ask_ad_allow"}, {"📋 白名单", "ad_allow_list"}},
+		[]btn{{"📋 白名单", "ad_allow_list"}, {"✏️ 手动添加", "ask_ad_allow"}},
 		[]btn{btnHome()},
 	)
 	b.render(ctx, v, sb.String(), inlineKeyboard(rows...))
 }
 
-// doAdBlockToggle 切换广告拦截。首次开启需下载约 2MB 规则集。
 func (b *Bot) doAdBlockToggle(ctx context.Context, v view, on bool) {
 	if on {
-		b.render(ctx, v, "🛡 正在开启广告拦截…\n\n<i>首次需下载规则集（约 2MB / 10 万条），请稍候。</i>", "")
+		b.render(ctx, v, "🛡 正在更新广告规则…\n\n<i>首次需下载规则集，大约十几秒。</i>", "")
 	}
 	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
-	msg, err := b.Manager.SetAdBlock(cctx, on)
+	_, err := b.Manager.SetAdBlock(cctx, on)
 	cancel()
 	if err != nil {
 		b.render(ctx, v, errBox("操作失败", err), backTo("adblock"))
 		return
 	}
-	b.render(ctx, v, "✅ "+html.EscapeString(msg), inlineKeyboard(
-		[]btn{{"🛡 返回广告拦截", "adblock"}},
-		[]btn{btnHome()},
-	))
+	b.showAdBlock(ctx, v)
 }
 
-// showAdAllowlist 列出白名单，每条一个删除按钮。
+func (b *Bot) doAdAllowHit(ctx context.Context, v view, fp string) {
+	st := b.Manager.Status(b.Version)
+	host := ""
+	for _, ev := range st.AdBlock.Hits.Recent {
+		if ruleFingerprint(ev.Host) == fp {
+			host = ev.Host
+			break
+		}
+	}
+	if host == "" {
+		b.render(ctx, v, "这条拦截记录已经翻过去了，请重新打开广告页再选。", backTo("adblock"))
+		return
+	}
+	if err := b.Manager.AllowAd(host); err != nil {
+		b.render(ctx, v, errBox("加入白名单失败", err), backTo("adblock"))
+		return
+	}
+	b.showAdBlock(ctx, v)
+}
+
 func (b *Bot) showAdAllowlist(ctx context.Context, v view) {
 	list := b.Manager.AdAllowlist()
 
