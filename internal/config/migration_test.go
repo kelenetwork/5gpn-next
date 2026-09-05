@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +82,39 @@ func TestLegacyConfigMigration(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("current config should migrate idempotently")
+	}
+}
+
+func TestLoadIgnoresRetiredPanelToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{
+  "gateway": {
+    "listen": ":20443",
+    "host": "gateway.example.com",
+    "cert_file": "/cert.pem",
+    "key_file": "/key.pem"
+  },
+  "egress": [{"name": "DIRECT", "type": "direct"}],
+  "final": "direct",
+  "panel": {"enabled": true, "token": "dead"},
+  "dns": {"enabled": true, "gateway_ip": "172.22.0.1"},
+  "client_cidr": "172.22.0.0/16"
+}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Panel.Enabled {
+		t.Fatal("panel.enabled should survive unknown token field")
+	}
+	out, err := json.Marshal(cfg.Panel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "token") {
+		t.Fatalf("retired panel.token leaked into marshal: %s", out)
 	}
 }

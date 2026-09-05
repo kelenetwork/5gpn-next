@@ -2,19 +2,24 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/egress"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
 	"github.com/kelenetwork/5gpn-next/internal/policy"
 	"github.com/kelenetwork/5gpn-next/internal/stats"
+	"github.com/kelenetwork/5gpn-next/internal/trace"
 )
 
 func testPanel(t *testing.T) (*Panel, *manage.Manager) {
@@ -157,5 +162,113 @@ func TestLandingPageUsesCurrentProductCopy(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(text), "relay") {
 		t.Fatal("landing page still contains retired relay wording")
+	}
+}
+
+func stubOKTrace(target string) *trace.Trace {
+	tr := trace.New("test", target, "")
+	tr.Step(trace.StageConnect, trace.StatusOK, "ok")
+	return tr
+}
+
+func TestProbeRejectsWhenTooFrequent(t *testing.T) {
+	panel, _ := testPanel(t)
+	var calls atomic.Int32
+	panel.probeFn = func(ctx context.Context, target string) *trace.Trace {
+		calls.Add(1)
+		return stubOKTrace(target)
+	}
+	h := panel.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/probe?target=example.test", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first probe status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/probe?target=example.test", nil)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second probe status=%d, want 429 body=%s", rec2.Code, rec2.Body.String())
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("rate-limited request still probed: calls=%d", calls.Load())
+	}
+}
+
+func TestProbeAllowsAfterInterval(t *testing.T) {
+	panel, _ := testPanel(t)
+	panel.probeMinInterval = 20 * time.Millisecond
+	var calls atomic.Int32
+	panel.probeFn = func(ctx context.Context, target string) *trace.Trace {
+		calls.Add(1)
+		return stubOKTrace(target)
+	}
+	h := panel.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/probe?target=example.test", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first probe status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	time.Sleep(30 * time.Millisecond)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/probe?target=example.test", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second probe status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("calls=%d, want 2", calls.Load())
+	}
+}
+
+func TestProbeRejectsWhenOverConcurrent(t *testing.T) {
+	panel, _ := testPanel(t)
+	panel.probeMinInterval = -1
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	panel.probeFn = func(ctx context.Context, target string) *trace.Trace {
+		calls.Add(1)
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return stubOKTrace(target)
+	}
+	h := panel.Handler()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/probe?target=example.test", nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("in-flight probe status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("in-flight probes did not start")
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/probe?target=example.test", nil))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("third probe status=%d, want 429 body=%s", rec.Code, rec.Body.String())
+	}
+	close(release)
+	wg.Wait()
+	if calls.Load() != 2 {
+		t.Fatalf("over-limit request still probed: calls=%d", calls.Load())
 	}
 }

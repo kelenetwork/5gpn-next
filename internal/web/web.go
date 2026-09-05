@@ -17,12 +17,14 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kelenetwork/5gpn-next/internal/monitor"
 
 	"github.com/kelenetwork/5gpn-next/internal/config"
 	"github.com/kelenetwork/5gpn-next/internal/manage"
+	"github.com/kelenetwork/5gpn-next/internal/trace"
 )
 
 //go:embed assets/*
@@ -38,6 +40,17 @@ type Panel struct {
 	AllowFrom []netip.Prefix
 
 	tmpl *template.Template
+
+	// probeFn 可替换实际探测，供单测注入；空则走 Manager.Probe。
+	probeFn func(ctx context.Context, target string) *trace.Trace
+	// probeMaxConcurrent 为 0 时使用默认上限 2。
+	probeMaxConcurrent int
+	// probeMinInterval 为 0 时使用默认 2s；负值关闭速率限制（仅测试）。
+	probeMinInterval time.Duration
+
+	probeMu        sync.Mutex
+	probeActive    int
+	probeLastStart time.Time
 }
 
 // New 构造面板。
@@ -394,21 +407,78 @@ func (p *Panel) apiEgress(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+const (
+	probeMaxConcurrent = 2
+	probeMinInterval   = 2 * time.Second
+)
+
 func (p *Panel) apiProbe(w http.ResponseWriter, r *http.Request) {
 	target := strings.TrimSpace(r.URL.Query().Get("target"))
 	if target == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 target"})
 		return
 	}
+	if err := p.tryBeginProbe(); err != nil {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+		return
+	}
+	defer p.endProbe()
+
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	tr := p.Manager.Probe(ctx, target)
+	tr := p.runProbe(ctx, target)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"target": target,
 		"ok":     tr.OK(),
 		"total":  tr.TotalMS(),
 		"steps":  tr.Steps(),
 	})
+}
+
+func (p *Panel) runProbe(ctx context.Context, target string) *trace.Trace {
+	if p.probeFn != nil {
+		return p.probeFn(ctx, target)
+	}
+	return p.Manager.Probe(ctx, target)
+}
+
+func (p *Panel) maxProbeConcurrent() int {
+	if p.probeMaxConcurrent > 0 {
+		return p.probeMaxConcurrent
+	}
+	return probeMaxConcurrent
+}
+
+func (p *Panel) minProbeInterval() time.Duration {
+	if p.probeMinInterval < 0 {
+		return 0
+	}
+	if p.probeMinInterval == 0 {
+		return probeMinInterval
+	}
+	return p.probeMinInterval
+}
+
+func (p *Panel) tryBeginProbe() error {
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	if p.probeActive >= p.maxProbeConcurrent() {
+		return fmt.Errorf("探测进行中，请稍后再试")
+	}
+	if wait := p.minProbeInterval(); wait > 0 && !p.probeLastStart.IsZero() && time.Since(p.probeLastStart) < wait {
+		return fmt.Errorf("探测过于频繁，请稍后再试")
+	}
+	p.probeActive++
+	p.probeLastStart = time.Now()
+	return nil
+}
+
+func (p *Panel) endProbe() {
+	p.probeMu.Lock()
+	if p.probeActive > 0 {
+		p.probeActive--
+	}
+	p.probeMu.Unlock()
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

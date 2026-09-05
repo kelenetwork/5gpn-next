@@ -146,11 +146,10 @@ type BotConfig struct {
 }
 
 // PanelConfig 是内网 Web 面板配置。
+// 认证模型是来源 CIDR + 写请求同源/JSON，没有第二道口令。
 type PanelConfig struct {
 	// Enabled 为 false 时完全不挂载面板路由
 	Enabled bool `json:"enabled"`
-	// Token 是登录令牌
-	Token string `json:"token"`
 }
 
 // GatewayConfig 是 HTTPS 管理端点配置。

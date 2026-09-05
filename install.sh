@@ -132,6 +132,134 @@ print(path)
 PY
 }
 
+
+# 把首次安装配置写成合法 JSON。用户输入一律经 json 编码，先写临时文件再 mv。
+write_config_json() {
+  local out="$1" tmp rc
+  tmp=$(mktemp "${out}.XXXXXX") || return 1
+  FGPN_WRITE_DOMAIN="$DOMAIN" \
+  FGPN_WRITE_LISTEN_PORT="$LISTEN_PORT" \
+  FGPN_WRITE_CERT="$CERT" \
+  FGPN_WRITE_KEY="$KEY" \
+  FGPN_WRITE_DLPATH="$DLPATH" \
+  FGPN_WRITE_CLIENT_CIDR="$CLIENT_CIDR" \
+  FGPN_WRITE_DNS_ON="$DNS_ON" \
+  FGPN_WRITE_GW_IP="${GW_IP:-}" \
+  FGPN_WRITE_LOGDIR="$LOGDIR" \
+  FGPN_WRITE_BOT_TOKEN="${BOT_TK:-}" \
+  FGPN_WRITE_BOT_IDS="${BOT_IDS:-}" \
+  FGPN_WRITE_HAS_NODE="${HAS_NODE:-0}" \
+  python3 - "$tmp" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+
+def env(name):
+    return os.environ.get(name, "")
+
+domain = env("FGPN_WRITE_DOMAIN")
+listen_port = env("FGPN_WRITE_LISTEN_PORT") or "20443"
+cert = env("FGPN_WRITE_CERT")
+key = env("FGPN_WRITE_KEY")
+dlpath = env("FGPN_WRITE_DLPATH")
+client_cidr = env("FGPN_WRITE_CLIENT_CIDR")
+dns_on = env("FGPN_WRITE_DNS_ON").lower() == "true"
+gw_ip = env("FGPN_WRITE_GW_IP")
+logdir = env("FGPN_WRITE_LOGDIR")
+bot_token = env("FGPN_WRITE_BOT_TOKEN")
+bot_ids = env("FGPN_WRITE_BOT_IDS")
+has_node = env("FGPN_WRITE_HAS_NODE") == "1"
+
+admins = []
+if bot_token:
+    raw = bot_ids.replace(" ", "")
+    if not raw:
+        bot_token = ""
+    else:
+        seen = set()
+        for part in raw.split(","):
+            if part == "":
+                continue
+            if not part.isdigit():
+                sys.stderr.write("管理员 ID 必须是正整数，收到 %r\n" % part)
+                sys.exit(2)
+            n = int(part)
+            if n <= 0:
+                sys.stderr.write("管理员 ID 必须是正整数，收到 %r\n" % part)
+                sys.exit(2)
+            if n in seen:
+                sys.stderr.write("管理员 ID 重复: %s\n" % n)
+                sys.exit(2)
+            seen.add(n)
+            admins.append(n)
+        if not admins:
+            bot_token = ""
+
+egress = [{"name": "DIRECT", "type": "direct"}]
+if has_node:
+    egress.append({
+        "name": "node",
+        "type": "socks5",
+        "addr": "127.0.0.1:7891",
+        "has_ipv6": False,
+    })
+
+cfg = {
+    "gateway": {
+        "listen": ":" + listen_port,
+        "host": domain,
+        "cert_file": cert,
+        "key_file": key,
+        "profile_path": dlpath,
+    },
+    "egress": egress,
+    "rules": [],
+    "final": "direct",
+    "rulesets": [
+        {
+            "name": "cn-domain",
+            "kind": "domain",
+            "interval_hours": 24,
+            "url": "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt",
+        },
+        {
+            "name": "geoip:cn",
+            "kind": "ipcidr",
+            "interval_hours": 24,
+            "url": "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/cn.txt",
+        },
+    ],
+    "bot": {"token": bot_token, "admins": admins},
+    "panel": {"enabled": True},
+    "dns": {
+        "enabled": dns_on,
+        "dot_listen": ":853",
+        "gateway_ip": gw_ip,
+        "http_listen": ":80",
+        "tls_listen": ":443",
+        "upstream": ["223.5.5.5:53", "119.29.29.29:53"],
+    },
+    "update": {
+        "check_enabled": True,
+        "interval_hours": 1,
+        "auto_apply": False,
+    },
+    "client_cidr": client_cidr,
+    "log_path": "%s/trace.jsonl" % logdir,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$out"
+}
+
 ask() {  # ask <变量名> <提示> <默认值>
   local __var=$1 __prompt=$2 __default=${3:-} __val
   __val=$(eval "printf '%s' \"\${$__var:-}\"")
@@ -205,6 +333,25 @@ if [ -n "$BOT_TK" ]; then
   if [ -z "$BOT_IDS" ]; then
     warn "未填写管理员 ID，Bot 不会响应任何人，已跳过 Bot 配置"
     BOT_TK=""
+  else
+    FGPN_WRITE_BOT_IDS="$BOT_IDS" python3 - <<'PY' || die "管理员 ID 必须是正整数（多个用英文逗号分隔），且不能重复"
+import os, sys
+raw = os.environ.get("FGPN_WRITE_BOT_IDS", "").replace(" ", "")
+seen = set()
+ok = False
+for part in raw.split(","):
+    if part == "":
+        continue
+    if not part.isdigit() or int(part) <= 0:
+        sys.exit(2)
+    n = int(part)
+    if n in seen:
+        sys.exit(2)
+    seen.add(n)
+    ok = True
+if not ok:
+    sys.exit(2)
+PY
   fi
 fi
 
@@ -319,7 +466,7 @@ if [ "$REUSE_CONFIG" = "1" ]; then
 else
 step "配置出口"
 
-EGRESS_JSON='{ "name": "DIRECT", "type": "direct" }'
+HAS_NODE=0
 FINAL="direct"
 
 if [ -n "$NODE" ]; then
@@ -403,8 +550,7 @@ EOF
     warn "出口连通性测试失败，稍后可用 5gpnd probe 排查"
   fi
 
-  EGRESS_JSON='{ "name": "DIRECT", "type": "direct" },
-    { "name": "node", "type": "socks5", "addr": "127.0.0.1:7891", "has_ipv6": false }'
+  HAS_NODE=1
   # 只登记节点，不在安装阶段擅自切换国外默认出口。
   # 用户应在 Bot/面板确认国内规则与节点连通均正常后再切换。
   FINAL="direct"
@@ -453,66 +599,13 @@ if [ -s "$CFGDIR/config.json" ]; then
     DLPATH="$OLD_DLPATH"
   fi
 fi
-# Bot 管理员 JSON 数组
-BOT_IDS_JSON=$(printf '%s' "$BOT_IDS" | tr -d ' ' | sed 's/,\{2,\}/,/g; s/^,//; s/,$//')
-
+# 用 python3 写出合法 JSON，避免域名/Token 中的引号破坏配置。
 if [ -s "$CFGDIR/config.json" ]; then
   cp -a "$CFGDIR/config.json" "$CFGDIR/config.json.bak.$(date -u +%Y%m%dT%H%M%SZ)"
   dim "已备份原配置"
 fi
-
-cat > "$CFGDIR/config.json" <<EOF
-{
-  "gateway": {
-    "listen": ":${LISTEN_PORT}",
-    "host": "${DOMAIN}",
-    "cert_file": "${CERT}",
-    "key_file": "${KEY}",
-    "profile_path": "${DLPATH}"
-  },
-  "egress": [
-    ${EGRESS_JSON}
-  ],
-  "rules": [],
-  "final": "${FINAL}",
-  "rulesets": [
-    {
-      "name": "cn-domain",
-      "kind": "domain",
-      "interval_hours": 24,
-      "url": "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt"
-    },
-    {
-      "name": "geoip:cn",
-      "kind": "ipcidr",
-      "interval_hours": 24,
-      "url": "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/cn.txt"
-    }
-  ],
-  "bot": {
-    "token": "${BOT_TK}",
-    "admins": [${BOT_IDS_JSON}]
-  },
-  "panel": {
-    "enabled": true
-  },
-  "dns": {
-    "enabled": ${DNS_ON},
-    "dot_listen": ":853",
-    "gateway_ip": "${GW_IP}",
-    "http_listen": ":80",
-    "tls_listen": ":443",
-    "upstream": ["223.5.5.5:53", "119.29.29.29:53"]
-  },
-  "update": {
-    "check_enabled": true,
-    "interval_hours": 1,
-    "auto_apply": false
-  },
-  "client_cidr": "${CLIENT_CIDR}",
-  "log_path": "${LOGDIR}/trace.jsonl"
-}
-EOF
+write_config_json "$CFGDIR/config.json" \
+  || die "生成配置失败。管理员 ID 须为正整数；域名与 Token 中的特殊字符会按 JSON 转义。"
 chmod 600 "$CFGDIR/config.json"
 /usr/local/bin/5gpnd check -c "$CFGDIR/config.json" >/dev/null 2>&1 || die "配置校验失败"
 ok "配置已写入 $CFGDIR/config.json"
