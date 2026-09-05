@@ -755,19 +755,41 @@ func (m *Manager) EffectiveRuleSets() []config.RuleSetConfig {
 
 // AllowAd 把域名加入广告白名单（误杀时救急）。
 func (m *Manager) AllowAd(domain string) error {
-	d := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(domain), "."))
-	if d == "" || strings.ContainsAny(d, ",/ ") {
-		return fmt.Errorf("域名 %q 格式不合法", domain)
+	d, err := normalizeAllowDomain(domain)
+	if err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, x := range m.Cfg.AdBlock.Allowlist {
 		if strings.EqualFold(x, d) {
-			return fmt.Errorf("%q 已在白名单中", d)
+			return nil
 		}
 	}
 	m.Cfg.AdBlock.Allowlist = append(m.Cfg.AdBlock.Allowlist, d)
 	return m.saveAndReloadLocked()
+}
+
+func normalizeAllowDomain(raw string) (string, error) {
+	d := strings.TrimSpace(raw)
+	d = strings.TrimPrefix(d, "http://")
+	d = strings.TrimPrefix(d, "https://")
+	if i := strings.IndexAny(d, "/?#"); i >= 0 {
+		d = d[:i]
+	}
+	if i := strings.IndexByte(d, ':'); i >= 0 {
+		// 丢掉用户误贴的端口，但拒绝异常的 IPv6 字面量当广告域名。
+		if !strings.Contains(d, "]") {
+			d = d[:i]
+		}
+	}
+	d = strings.TrimSpace(strings.TrimPrefix(d, "."))
+	d = strings.TrimSuffix(d, ".")
+	d = strings.ToLower(d)
+	if d == "" || strings.ContainsAny(d, ", ") || strings.Contains(d, "..") {
+		return "", fmt.Errorf("域名 %q 格式不合法", raw)
+	}
+	return d, nil
 }
 
 // AdAllowlist 返回白名单副本。
