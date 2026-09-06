@@ -3,8 +3,8 @@ package manage
 import (
 	"testing"
 
-	"github.com/kelenetwork/5gpn-next/internal/config"
-	"github.com/kelenetwork/5gpn-next/internal/monitor"
+	"github.com/w0ven/5gpn-next/internal/config"
+	"github.com/w0ven/5gpn-next/internal/monitor"
 )
 
 func TestHealthReportHidesDeletedEgress(t *testing.T) {

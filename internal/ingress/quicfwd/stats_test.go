@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/egress"
-	"github.com/kelenetwork/5gpn-next/internal/policy"
+	"github.com/w0ven/5gpn-next/internal/egress"
+	"github.com/w0ven/5gpn-next/internal/policy"
 )
 
 func TestStatsActionUsesPolicyCategory(t *testing.T) {

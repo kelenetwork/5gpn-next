@@ -1,4 +1,4 @@
-module github.com/kelenetwork/5gpn-next
+module github.com/w0ven/5gpn-next
 
 go 1.23.0
 

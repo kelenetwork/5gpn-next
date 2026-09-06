@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kelenetwork/5gpn-next/internal/config"
-	"github.com/kelenetwork/5gpn-next/internal/egress"
-	"github.com/kelenetwork/5gpn-next/internal/policy"
-	"github.com/kelenetwork/5gpn-next/internal/ruleset"
+	"github.com/w0ven/5gpn-next/internal/config"
+	"github.com/w0ven/5gpn-next/internal/egress"
+	"github.com/w0ven/5gpn-next/internal/policy"
+	"github.com/w0ven/5gpn-next/internal/ruleset"
 )
 
 func TestSetAdBlockRetriesWhenEnabledButRuntimeIsEmpty(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"net/netip"
 	"sync/atomic"
 
-	"github.com/kelenetwork/5gpn-next/internal/egress"
-	"github.com/kelenetwork/5gpn-next/internal/policy"
+	"github.com/w0ven/5gpn-next/internal/egress"
+	"github.com/w0ven/5gpn-next/internal/policy"
 )
 
 // gatewayRuntime 持有可热重载的策略引擎与出口注册表。

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/ruleset"
+	"github.com/w0ven/5gpn-next/internal/ruleset"
 )
 
 // Action 是决策结果。

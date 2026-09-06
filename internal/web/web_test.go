@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/config"
-	"github.com/kelenetwork/5gpn-next/internal/egress"
-	"github.com/kelenetwork/5gpn-next/internal/manage"
-	"github.com/kelenetwork/5gpn-next/internal/policy"
-	"github.com/kelenetwork/5gpn-next/internal/stats"
-	"github.com/kelenetwork/5gpn-next/internal/trace"
+	"github.com/w0ven/5gpn-next/internal/config"
+	"github.com/w0ven/5gpn-next/internal/egress"
+	"github.com/w0ven/5gpn-next/internal/manage"
+	"github.com/w0ven/5gpn-next/internal/policy"
+	"github.com/w0ven/5gpn-next/internal/stats"
+	"github.com/w0ven/5gpn-next/internal/trace"
 )
 
 func testPanel(t *testing.T) (*Panel, *manage.Manager) {

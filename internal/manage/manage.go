@@ -19,16 +19,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/config"
-	"github.com/kelenetwork/5gpn-next/internal/egress"
-	"github.com/kelenetwork/5gpn-next/internal/monitor"
-	"github.com/kelenetwork/5gpn-next/internal/node"
-	"github.com/kelenetwork/5gpn-next/internal/policy"
-	"github.com/kelenetwork/5gpn-next/internal/probe"
-	"github.com/kelenetwork/5gpn-next/internal/ruleset"
-	"github.com/kelenetwork/5gpn-next/internal/stats"
-	"github.com/kelenetwork/5gpn-next/internal/trace"
-	"github.com/kelenetwork/5gpn-next/internal/update"
+	"github.com/w0ven/5gpn-next/internal/config"
+	"github.com/w0ven/5gpn-next/internal/egress"
+	"github.com/w0ven/5gpn-next/internal/monitor"
+	"github.com/w0ven/5gpn-next/internal/node"
+	"github.com/w0ven/5gpn-next/internal/policy"
+	"github.com/w0ven/5gpn-next/internal/probe"
+	"github.com/w0ven/5gpn-next/internal/ruleset"
+	"github.com/w0ven/5gpn-next/internal/stats"
+	"github.com/w0ven/5gpn-next/internal/trace"
+	"github.com/w0ven/5gpn-next/internal/update"
 )
 
 // StatsSource 提供运行时计数。

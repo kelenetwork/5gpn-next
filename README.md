@@ -8,7 +8,7 @@
 **iPhone 安装一张描述文件，Android 填一个私人 DNS 域名。**<br>
 分流、出口、广告拦截与诊断全部留在服务端完成。
 
-[![Release](https://img.shields.io/github/v/release/kelenetwork/5gpn-next?style=for-the-badge&color=155eef&label=Release)](https://github.com/kelenetwork/5gpn-next/releases)
+[![Release](https://img.shields.io/github/v/release/w0ven/5gpn-next?style=for-the-badge&color=155eef&label=Release)](https://github.com/w0ven/5gpn-next/releases)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-155eef?style=for-the-badge)](LICENSE)
 [![Platforms](https://img.shields.io/badge/iOS%2017%2B%20%7C%20Android%209%2B-122033?style=for-the-badge)](#-客户端接入)
@@ -99,7 +99,7 @@
 ### 一键安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kelenetwork/5gpn-next/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/w0ven/5gpn-next/main/install.sh | sudo bash
 ```
 
 安装器会自动完成：
@@ -120,7 +120,7 @@ sudo FGPN_FORCE_RECONFIG=1 bash install.sh
 ### 卸载
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kelenetwork/5gpn-next/main/uninstall.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/w0ven/5gpn-next/main/uninstall.sh | sudo bash
 ```
 
 追加 `--purge` 可一并删除配置与运行数据。

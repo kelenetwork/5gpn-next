@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	repo       = "kelenetwork/5gpn-next"
+	repo       = "w0ven/5gpn-next"
 	binPath    = "/usr/local/bin/5gpnd"
 	stateDir   = "/var/lib/5gpn-next"
 	backupDir  = stateDir + "/versions"

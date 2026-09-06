@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/monitor"
+	"github.com/w0ven/5gpn-next/internal/monitor"
 )
 
 // telegramTags 是 Telegram HTML parse_mode 支持的标签集合。

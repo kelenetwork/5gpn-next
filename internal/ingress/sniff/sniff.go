@@ -23,9 +23,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/egress"
-	"github.com/kelenetwork/5gpn-next/internal/policy"
-	"github.com/kelenetwork/5gpn-next/internal/trace"
+	"github.com/w0ven/5gpn-next/internal/egress"
+	"github.com/w0ven/5gpn-next/internal/policy"
+	"github.com/w0ven/5gpn-next/internal/trace"
 )
 
 // ErrNoHost 表示无法从首包还原目的地。

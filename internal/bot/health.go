@@ -6,7 +6,7 @@ import (
 	"html"
 	"strings"
 
-	"github.com/kelenetwork/5gpn-next/internal/monitor"
+	"github.com/w0ven/5gpn-next/internal/monitor"
 )
 
 // showHealth 展示健康监控总览：出口探测、真实转发、DoT、会话水位与系统面。

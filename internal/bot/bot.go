@@ -28,11 +28,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/config"
-	"github.com/kelenetwork/5gpn-next/internal/manage"
-	"github.com/kelenetwork/5gpn-next/internal/qrcode"
-	"github.com/kelenetwork/5gpn-next/internal/stats"
-	updatepkg "github.com/kelenetwork/5gpn-next/internal/update"
+	"github.com/w0ven/5gpn-next/internal/config"
+	"github.com/w0ven/5gpn-next/internal/manage"
+	"github.com/w0ven/5gpn-next/internal/qrcode"
+	"github.com/w0ven/5gpn-next/internal/stats"
+	updatepkg "github.com/w0ven/5gpn-next/internal/update"
 )
 
 // Bot 是 Telegram 管理机器人。

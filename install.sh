@@ -1,7 +1,7 @@
 #!/bin/bash
 # 5gpn-NEXT 一键安装
 #
-#   curl -fsSL https://raw.githubusercontent.com/kelenetwork/5gpn-next/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/w0ven/5gpn-next/main/install.sh | sudo bash
 #
 # 非交互安装（所有变量可预置）：
 #   sudo FGPN_DOMAIN=gw.example.com \
@@ -17,7 +17,7 @@
 # Release 二进制必须通过 SHA256SUMS 校验后才会落地。
 set -euo pipefail
 
-REPO="kelenetwork/5gpn-next"
+REPO="w0ven/5gpn-next"
 MIHOMO_VER="v1.19.29"
 CLIENT_CIDR="${FGPN_CLIENT_CIDR:-172.22.0.0/16}"
 LISTEN_PORT="${FGPN_PORT:-20443}"
@@ -685,7 +685,7 @@ step "启动服务"
 cat > /etc/systemd/system/5gpn-next.service <<'EOF'
 [Unit]
 Description=5gpn-NEXT encrypted DNS gateway
-Documentation=https://github.com/kelenetwork/5gpn-next
+Documentation=https://github.com/w0ven/5gpn-next
 After=network-online.target
 Wants=network-online.target
 StartLimitBurst=10

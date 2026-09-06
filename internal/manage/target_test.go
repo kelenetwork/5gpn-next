@@ -3,7 +3,7 @@ package manage
 import (
 	"testing"
 
-	"github.com/kelenetwork/5gpn-next/internal/config"
+	"github.com/w0ven/5gpn-next/internal/config"
 )
 
 func TestNormalizeTarget(t *testing.T) {

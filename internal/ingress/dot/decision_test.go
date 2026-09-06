@@ -9,7 +9,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/kelenetwork/5gpn-next/internal/policy"
+	"github.com/w0ven/5gpn-next/internal/policy"
 )
 
 type decisionWriter struct {

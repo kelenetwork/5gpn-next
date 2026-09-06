@@ -20,11 +20,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/monitor"
+	"github.com/w0ven/5gpn-next/internal/monitor"
 
-	"github.com/kelenetwork/5gpn-next/internal/config"
-	"github.com/kelenetwork/5gpn-next/internal/manage"
-	"github.com/kelenetwork/5gpn-next/internal/trace"
+	"github.com/w0ven/5gpn-next/internal/config"
+	"github.com/w0ven/5gpn-next/internal/manage"
+	"github.com/w0ven/5gpn-next/internal/trace"
 )
 
 //go:embed assets/*

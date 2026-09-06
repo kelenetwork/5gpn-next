@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kelenetwork/5gpn-next/internal/ruleset"
+	"github.com/w0ven/5gpn-next/internal/ruleset"
 )
 
 func mustTarget(t *testing.T, s string) Target {
